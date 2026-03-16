@@ -1,0 +1,22 @@
+{
+  "token": "YOUR_BOT_TOKEN_HERE",
+  "guild_id": "123456789012345678",
+  "log_file": "bot.log",
+  "bot": {
+    "managed_messages": [
+      {
+        "message": "stablename:welcome",
+        "channel": "stablename:general",
+        "content": "Welcome to the server!"
+      }
+    ],
+    "reaction_roles": [
+      {
+        "message": "stablename:welcome",
+        "emoji": "✅",
+        "role": "stablename:Member",
+        "seed_reaction": true
+      }
+    ]
+  }
+}

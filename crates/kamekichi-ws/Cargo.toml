@@ -1,0 +1,12 @@
+[package]
+name = "kamekichi-ws"
+version = "0.1.0"
+edition = "2024"
+description = "WebSocket client library"
+license = "MIT / Apache-2.0"
+repository = "https://github.com/golddranks/kamekichi-bot"
+
+[dependencies]
+base64 = "0.22.1"
+ring = "0.17.14"
+rand_core = "0.10.0"

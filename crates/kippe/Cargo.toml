@@ -1,0 +1,8 @@
+[package]
+name = "kippe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kamekichi = { path = "../kamekichi" }
+serde = { version = "1", features = ["derive"] }
