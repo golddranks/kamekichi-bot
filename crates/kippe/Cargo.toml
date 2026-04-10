@@ -1,8 +1,11 @@
 [package]
 name = "kippe"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
+description = "User-friendly Discord bot"
+license = "MIT / Apache-2.0"
+repository = "https://github.com/golddranks/kamekichi-bot"
 
 [dependencies]
-kamekichi = { path = "../kamekichi" }
+kamekichi = "0.0.1"
 serde = { version = "1", features = ["derive"] }

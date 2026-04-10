@@ -134,6 +134,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kamekichi"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c577bbdbb16679b3912af4f94394613e4b820ce849d99d2967e0a358a67858e"
+dependencies = [
+ "kamekichi-discord 0.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "ring",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kamekichi-discord"
 version = "0.0.1"
 dependencies = [
@@ -185,9 +197,9 @@ dependencies = [
 
 [[package]]
 name = "kippe"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
- "kamekichi",
+ "kamekichi 0.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
 
@@ -394,7 +406,7 @@ dependencies = [
 name = "testbed"
 version = "0.1.0"
 dependencies = [
- "kamekichi",
+ "kamekichi 0.0.1",
  "serde",
 ]
 
