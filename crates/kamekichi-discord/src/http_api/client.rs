@@ -1,113 +1,57 @@
 use std::cell::RefCell;
+use std::fmt::Display;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::ops::Not;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{Error, TlsStream};
 
+// TODOs
+// constify the HTTP status codes
+
 const MAX_RESPONSE_BODY: usize = 16 * 1024 * 1024; // 16 MiB
 
-pub struct HttpClient {
+pub struct Client {
+    pub(crate) host: String,
     pub(crate) token: String,
-    user_agent: String,
-    tls_config: Arc<rustls::ClientConfig>,
-    conn: RefCell<Option<TlsStream>>,
+    pub(crate) user_agent: String,
+    pub(crate) tls_config: Arc<rustls::ClientConfig>,
+    pub(crate) conn: RefCell<Option<TlsStream>>,
 }
 
-impl HttpClient {
-    pub(crate) fn new(
-        token: String,
-        user_agent: String,
-        tls_config: Arc<rustls::ClientConfig>,
-    ) -> Self {
-        Self {
-            token,
-            user_agent,
-            tls_config,
-            conn: RefCell::new(None),
+#[derive(Clone, Copy)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
+    Delete,
+    Patch,
+}
+
+impl Method {
+    fn is_idempotent(&self) -> bool {
+        matches!(self, Method::Get | Method::Delete | Method::Patch)
+    }
+}
+
+impl Display for Method {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Method::Get => write!(f, "GET"),
+            Method::Post => write!(f, "POST"),
+            Method::Put => write!(f, "PUT"),
+            Method::Delete => write!(f, "DELETE"),
+            Method::Patch => write!(f, "PATCH"),
         }
     }
+}
 
-    fn connect(&self) -> Result<TlsStream, Error> {
-        let host = "discord.com";
-        let server_name = rustls::pki_types::ServerName::try_from(host)?.to_owned();
-        let tls_conn = rustls::ClientConnection::new(self.tls_config.clone(), server_name)?;
-        let tcp = TcpStream::connect((host, 443))?;
-        tcp.set_read_timeout(Some(Duration::from_secs(30)))?;
-        Ok(rustls::StreamOwned::new(tls_conn, tcp))
-    }
-
-    pub fn send_message(
+impl Client {
+    pub fn request(
         &self,
-        channel_id: u64,
-        content: &str,
-    ) -> Result<(u16, Option<u64>), Error> {
-        let path = format!("/api/v10/channels/{channel_id}/messages");
-        let body = serde_json::json!({ "content": content }).to_string();
-        let (status, resp_body) = self.request("POST", &path, Some(&body))?;
-        let message_id = if (200..300).contains(&status) {
-            serde_json::from_str::<serde_json::Value>(&resp_body)
-                .ok()
-                .and_then(|v| v.get("id")?.as_str()?.parse::<u64>().ok())
-        } else {
-            None
-        };
-        Ok((status, message_id))
-    }
-
-    pub fn edit_message(
-        &self,
-        channel_id: u64,
-        message_id: u64,
-        content: &str,
-    ) -> Result<u16, Error> {
-        let path = format!("/api/v10/channels/{channel_id}/messages/{message_id}");
-        let body = serde_json::json!({ "content": content }).to_string();
-        Ok(self.request("PATCH", &path, Some(&body))?.0)
-    }
-
-    pub fn add_reaction(
-        &self,
-        channel_id: u64,
-        message_id: u64,
-        emoji: &str,
-    ) -> Result<u16, Error> {
-        let emoji_encoded = percent_encode(emoji);
-        let path = format!(
-            "/api/v10/channels/{channel_id}/messages/{message_id}/reactions/{emoji_encoded}/@me"
-        );
-        Ok(self.request("PUT", &path, None)?.0)
-    }
-
-    /// Fetch the gateway WebSocket URL from `GET /api/v10/gateway/bot`,
-    /// with `?v=10&encoding=json` appended.
-    pub fn get_gateway_url(&self) -> Result<String, Error> {
-        let (status, body) = self.request("GET", "/api/v10/gateway/bot", None)?;
-        if !(200..300).contains(&status) {
-            return Err(Error::RetriesExhausted { status });
-        }
-        #[derive(serde::Deserialize)]
-        struct GatewayBot {
-            url: String,
-        }
-        let gw: GatewayBot = serde_json::from_str(&body)?;
-        Ok(format!("{}/?v=10&encoding=json", gw.url))
-    }
-
-    pub fn add_role(&self, guild_id: u64, user_id: u64, role_id: u64) -> Result<u16, Error> {
-        let path = format!("/api/v10/guilds/{guild_id}/members/{user_id}/roles/{role_id}");
-        Ok(self.request("PUT", &path, None)?.0)
-    }
-
-    pub fn remove_role(&self, guild_id: u64, user_id: u64, role_id: u64) -> Result<u16, Error> {
-        let path = format!("/api/v10/guilds/{guild_id}/members/{user_id}/roles/{role_id}");
-        Ok(self.request("DELETE", &path, None)?.0)
-    }
-
-    fn request(
-        &self,
-        method: &str,
+        method: Method,
         path: &str,
         body: Option<&str>,
     ) -> Result<(u16, String), Error> {
@@ -119,9 +63,6 @@ impl HttpClient {
                 last_status = status;
                 if attempt + 1 < MAX_ATTEMPTS {
                     let wait = retry_after.unwrap_or(1.0).clamp(0.0, 60.0);
-                    eprintln!(
-                        "Rate limited on {method} {path}, retrying in {wait:.1}s (attempt {attempt})"
-                    );
                     std::thread::sleep(Duration::from_secs_f64(wait));
                 }
                 continue;
@@ -130,9 +71,6 @@ impl HttpClient {
                 last_status = status;
                 if attempt + 1 < MAX_ATTEMPTS {
                     let wait = (1u64 << attempt).min(8) as f64;
-                    eprintln!(
-                        "Server error {status} on {method} {path}, retrying in {wait:.0}s (attempt {attempt})"
-                    );
                     std::thread::sleep(Duration::from_secs_f64(wait));
                 }
                 continue;
@@ -147,9 +85,17 @@ impl HttpClient {
         })
     }
 
+    fn connect(&self) -> Result<TlsStream, Error> {
+        let server_name = rustls::pki_types::ServerName::try_from(self.host.as_str())?.to_owned();
+        let tls_conn = rustls::ClientConnection::new(self.tls_config.clone(), server_name)?;
+        let tcp = TcpStream::connect((self.host.as_str(), 443))?;
+        tcp.set_read_timeout(Some(Duration::from_secs(30)))?;
+        Ok(rustls::StreamOwned::new(tls_conn, tcp))
+    }
+
     fn request_once(
         &self,
-        method: &str,
+        method: Method,
         path: &str,
         body: Option<&str>,
     ) -> Result<(u16, Option<f64>, String), Error> {
@@ -179,8 +125,7 @@ impl HttpClient {
                 // already processed the request before the connection
                 // dropped, so retrying could create duplicates.
                 drop(stream);
-                let idempotent = matches!(method, "GET" | "HEAD" | "PUT" | "DELETE");
-                if !idempotent {
+                if method.is_idempotent().not() {
                     return Err(e);
                 }
                 eprintln!("Stale connection ({e}), retrying with fresh connection");
@@ -206,7 +151,7 @@ fn send_and_read(
     stream: &mut (impl Read + Write),
     token: &str,
     user_agent: &str,
-    method: &str,
+    method: Method,
     path: &str,
     body: Option<&str>,
 ) -> Result<(u16, Option<f64>, String, bool), Error> {
@@ -431,7 +376,7 @@ fn read_chunked_body(stream: &mut impl Read, leftover: Vec<u8>) -> Result<Vec<u8
     Ok(result)
 }
 
-fn percent_encode(s: &str) -> String {
+pub fn percent_encode(s: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::new();
     for &byte in s.as_bytes() {
@@ -498,7 +443,7 @@ mod tests {
 
     fn do_request(response: Vec<u8>) -> Result<(u16, Option<f64>, String, bool), Error> {
         let mut stream = MockStream::new(response);
-        send_and_read(&mut stream, "tok", "test-agent", "GET", "/test", None)
+        send_and_read(&mut stream, "tok", "test-agent", Method::Get, "/test", None)
     }
 
     // -- Fixed body --
