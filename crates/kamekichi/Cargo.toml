@@ -2,9 +2,12 @@
 name = "kamekichi"
 version = "0.0.1"
 edition = "2024"
+description = "Discord bot framework"
+license = "MIT / Apache-2.0"
+repository = "https://github.com/golddranks/kamekichi-bot"
 
 [dependencies]
-kamekichi-discord = { path = "../kamekichi-discord" }
+kamekichi-discord = "0.0.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 ring = "0.17.14"
