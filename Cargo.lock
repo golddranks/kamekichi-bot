@@ -138,7 +138,7 @@ name = "kamekichi-discord"
 version = "0.0.1"
 dependencies = [
  "getrandom 0.4.2",
- "kamekichi-ws",
+ "kamekichi-ws 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand_core",
  "rand_xoshiro",
  "rustls",
@@ -150,6 +150,17 @@ dependencies = [
 [[package]]
 name = "kamekichi-ws"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "rand_core",
+ "ring",
+]
+
+[[package]]
+name = "kamekichi-ws"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b97e796e0f59c85ccbd113bca7f1ef9cd6fe48583155ba300c54411b35ace87c"
 dependencies = [
  "base64",
  "rand_core",
