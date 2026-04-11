@@ -150,9 +150,9 @@ name = "kamekichi-discord"
 version = "0.0.1"
 dependencies = [
  "getrandom 0.4.2",
- "kamekichi-ws 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "kamekichi-ws 0.1.0",
  "rand_core",
- "rand_xoshiro",
+ "rand_pcg",
  "rustls",
  "serde",
  "serde_json",
@@ -166,7 +166,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2a0df9fbbf83ec1af4627cbe5dbe5cdc8c30177a25629e59280d4d2fca8683f"
 dependencies = [
  "getrandom 0.4.2",
- "kamekichi-ws 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "kamekichi-ws 0.1.0",
  "rand_core",
  "rand_xoshiro",
  "rustls",
@@ -178,6 +178,8 @@ dependencies = [
 [[package]]
 name = "kamekichi-ws"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b97e796e0f59c85ccbd113bca7f1ef9cd6fe48583155ba300c54411b35ace87c"
 dependencies = [
  "base64",
  "rand_core",
@@ -186,9 +188,7 @@ dependencies = [
 
 [[package]]
 name = "kamekichi-ws"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b97e796e0f59c85ccbd113bca7f1ef9cd6fe48583155ba300c54411b35ace87c"
+version = "0.1.1"
 dependencies = [
  "base64",
  "rand_core",
@@ -272,6 +272,15 @@ name = "rand_core"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c8d0fd677905edcbeedbf2edb6494d676f0e98d54d5cf9bda0b061cb8fb8aba"
+
+[[package]]
+name = "rand_pcg"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a36dd10a879f5c16e363eed24471b321b114ce3112c2d5d8df06545fcf48152"
+dependencies = [
+ "rand_core",
+]
 
 [[package]]
 name = "rand_xoshiro"

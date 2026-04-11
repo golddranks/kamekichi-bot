@@ -1,32 +1,25 @@
+use std::io::{self, Cursor};
+
 use super::*;
+use crate::Rng;
+use read_buf::FillError;
 
 struct CounterRng(u32);
 
-impl rand_core::TryRng for CounterRng {
-    type Error = std::convert::Infallible;
-
-    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        let v = self.0;
-        self.0 = self.0.wrapping_add(1);
-        Ok(v)
-    }
-
-    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        let lo = self.try_next_u32()? as u64;
-        let hi = self.try_next_u32()? as u64;
-        Ok(lo | (hi << 32))
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+impl Rng for CounterRng {
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
         for chunk in dest.chunks_mut(4) {
-            let bytes = self.try_next_u32()?.to_le_bytes();
+            let bytes = self.next_u32().to_le_bytes();
             chunk.copy_from_slice(&bytes[..chunk.len()]);
         }
-        Ok(())
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        let v = self.0;
+        self.0 = self.0.wrapping_add(1);
+        v
     }
 }
-use std::io::{self, Cursor};
-
 struct MockStream {
     rx: Cursor<Vec<u8>>,
     tx: Vec<u8>,
@@ -1662,17 +1655,13 @@ fn fragment_buf_shrinks_after_large_message() {
 /// RNG that always returns 0 — deterministic for shrink tests.
 struct ZeroRng;
 
-impl rand_core::TryRng for ZeroRng {
-    type Error = std::convert::Infallible;
-    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        Ok(0)
-    }
-    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        Ok(0)
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+impl Rng for ZeroRng {
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
         dest.fill(0);
-        Ok(())
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        0
     }
 }
 
@@ -1828,3 +1817,18 @@ fn flush_stream_flush_timed_out() {
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(TimedOutFlushMock);
     assert_eq!(ws.flush().unwrap(), SendResult::Queued);
 }
+
+// ---- Send + Sync static assertions ----
+
+const _: () = {
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+    fn assertions() {
+        assert_send::<Error>();
+        assert_sync::<Error>();
+        assert_send::<ConnectionError>();
+        assert_sync::<ConnectionError>();
+        assert_send::<CallerError>();
+        assert_sync::<CallerError>();
+    }
+};

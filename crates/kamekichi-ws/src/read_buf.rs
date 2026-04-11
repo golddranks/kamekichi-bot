@@ -1,7 +1,7 @@
 use std::io::{self, Read};
 use std::ops::Range;
 
-use rand_core::Rng;
+use crate::rng::Rng;
 
 const MIN_READ_BUF: usize = 4096;
 
@@ -183,7 +183,7 @@ impl ReadBuf {
     /// Probabilistically shrink the backing allocation if capacity
     /// exceeds `max_cap`.  Only effective after a compact (`start == 0`).
     pub fn maybe_shrink_capacity(&mut self, max_cap: usize, rng: &mut impl Rng) {
-        if self.start == 0 && self.buf.capacity() > max_cap && rng.next_u32() & 0b111 == 0 {
+        if self.start == 0 && self.buf.capacity() > max_cap && rng.one_in_eight_odds() {
             self.buf.truncate(self.end);
             self.buf.shrink_to(max_cap);
         }

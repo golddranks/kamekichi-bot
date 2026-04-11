@@ -1,12 +1,18 @@
 [package]
 name = "kamekichi-ws"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "WebSocket client library"
-license = "MIT / Apache-2.0"
-repository = "https://github.com/golddranks/kamekichi-bot"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+repository = "https://github.com/golddranks/kamekichi-bot/tree/main/crates/kamekichi-ws"
+categories = ["network-programming", "web-programming::websocket"]
+keywords = ["websocket", "rfc6455", "ws"]
 
 [dependencies]
 base64 = "0.22.1"
 ring = "0.17.14"
-rand_core = "0.10.0"
+rand_core = { optional = true, version = "0.10.0" }
+
+[features]
+rand = ["dep:rand_core"]

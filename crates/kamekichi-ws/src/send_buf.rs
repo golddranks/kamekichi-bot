@@ -1,8 +1,7 @@
 use std::io::{self, Write};
 
-use rand_core::Rng;
-
 use crate::ConnectionError;
+use crate::rng::Rng;
 
 /// Outgoing byte buffer with a drain cursor.
 ///
@@ -78,10 +77,7 @@ impl SendBuf {
     /// Probabilistically shrink the backing allocation if capacity
     /// exceeds `max_cap`.  Only shrinks when all data has been sent.
     pub fn maybe_shrink(&mut self, max_cap: usize, rng: &mut impl Rng) {
-        if self.pos >= self.buf.len()
-            && self.buf.capacity() > max_cap
-            && rng.next_u32() & 0b111 == 0
-        {
+        if self.pos >= self.buf.len() && self.buf.capacity() > max_cap && rng.one_in_eight_odds() {
             self.buf.clear();
             self.pos = 0;
             self.buf.shrink_to(max_cap);
