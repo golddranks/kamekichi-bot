@@ -25,3 +25,38 @@ where
         rand_core::Rng::next_u32(self)
     }
 }
+
+#[cfg(all(feature = "rand", test))]
+mod tests {
+    use super::Rng;
+    use std::convert::Infallible;
+    struct Dummy;
+
+    impl rand_core::TryRng for Dummy {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(1)
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            unreachable!()
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+            for b in dest {
+                *b = 0xAA;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_rand_core_impl_bridge() {
+        let mut buf = [0u8; 4];
+        Rng::fill_bytes(&mut Dummy, &mut buf);
+        assert_eq!(buf, [0xAA; 4]);
+
+        assert_eq!(Rng::next_u32(&mut Dummy), 1);
+    }
+}

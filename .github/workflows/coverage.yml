@@ -20,11 +20,14 @@ jobs:
           workspaces: ". -> target"
 
       - name: Install tarpaulin
-        run: which cargo-tarpaulin || cargo install cargo-tarpaulin --locked
+        run: |
+          which cargo-tarpaulin || cargo install cargo-tarpaulin@0.35.2 --locked
 
       - name: Run tarpaulin
         run: >-
-          cargo tarpaulin -p kamekichi-ws --skip-clean --engine llvm
-          --exclude-files 'crates/kamekichi/*' --exclude-files 'crates/kamekichi-discord/*'
-          --exclude-files 'crates/kippe/*' --exclude-files 'crates/testbed/*'
+          cargo tarpaulin -p kamekichi-ws --features rand --skip-clean --engine llvm
+          --exclude-files 'crates/kamekichi/*'
+          --exclude-files 'crates/kamekichi-discord/*'
+          --exclude-files 'crates/kippe/*'
+          --exclude-files 'crates/testbed/*'
           --fail-under 97

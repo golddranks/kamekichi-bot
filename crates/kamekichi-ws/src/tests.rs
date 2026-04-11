@@ -1,3 +1,7 @@
+// Without this cfg, some versions tarpaulin consider this module as
+// a normal code module and report coverage for it.
+#![cfg(test)]
+
 use std::io::{self, Cursor};
 
 use super::*;
@@ -20,6 +24,7 @@ impl Rng for CounterRng {
         v
     }
 }
+
 struct MockStream {
     rx: Cursor<Vec<u8>>,
     tx: Vec<u8>,
@@ -1821,14 +1826,14 @@ fn flush_stream_flush_timed_out() {
 // ---- Send + Sync static assertions ----
 
 const _: () = {
-    fn assert_send<T: Send>() {}
-    fn assert_sync<T: Sync>() {}
-    fn assertions() {
-        assert_send::<Error>();
-        assert_sync::<Error>();
-        assert_send::<ConnectionError>();
-        assert_sync::<ConnectionError>();
-        assert_send::<CallerError>();
-        assert_sync::<CallerError>();
+    fn _assert_send<T: Send>() {}
+    fn _assert_sync<T: Sync>() {}
+    fn _assertions() {
+        _assert_send::<Error>();
+        _assert_sync::<Error>();
+        _assert_send::<ConnectionError>();
+        _assert_sync::<ConnectionError>();
+        _assert_send::<CallerError>();
+        _assert_sync::<CallerError>();
     }
 };
