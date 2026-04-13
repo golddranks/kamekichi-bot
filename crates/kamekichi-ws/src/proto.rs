@@ -51,8 +51,6 @@ pub(crate) struct Buffers {
     /// Incoming byte buffer.  Non-fragmented messages are borrowed
     /// directly from here, avoiding copies.
     pub(crate) read: ReadBuf,
-    /// Scratch space for line-end positions during header parsing.
-    pub(crate) line_ends: Vec<usize>,
     /// Outgoing byte buffer; partially-flushed frames are retried on
     /// the next flush.
     pub(crate) send: SendBuf,
@@ -101,7 +99,6 @@ impl Buffers {
     pub(crate) fn new() -> Self {
         Buffers {
             read: ReadBuf::with_capacity(MAX_HEADER),
-            line_ends: Vec::with_capacity(16),
             send: SendBuf::with_capacity(256),
             fragment_buf: Vec::new(),
         }
@@ -110,217 +107,215 @@ impl Buffers {
     pub(crate) fn clear(&mut self) {
         self.read.clear();
         self.send.clear();
-        self.line_ends.clear();
         self.fragment_buf.clear();
     }
+}
 
-    pub(crate) fn read_message<S: Read + Write, R: Rng>(
-        &mut self,
-        stream: &mut S,
-        sess: &mut Session,
-        rng: &mut R,
-    ) -> Result<Option<Message<'_>>, ConnError> {
-        // If a previous send (e.g. a pong reply) was only partially
-        // written to the stream, finish sending it now.
-        if self.send.has_pending() {
-            match self.send.flush(stream) {
-                Ok(()) => {
-                    let _ = stream.flush();
-                    self.send.maybe_shrink(sess.max_buf_size, rng);
-                }
-                // Don't propagate — this is a read call; returning
-                // WouldBlock would make the caller wait for readability
-                // when the real bottleneck is writability.  The bytes
-                // stay in the send buffer and will go out on the next attempt
-                // on a best-effort basis.
-                Err(e) if e.is_would_block() => {}
-                Err(e) => return Err(e.into()),
+pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
+    bufs: &'b mut Buffers,
+    stream: &mut S,
+    sess: &mut Session,
+    rng: &mut R,
+) -> Result<Option<Message<'b>>, ConnError> {
+    // If a previous send (e.g. a pong reply) was only partially
+    // written to the stream, finish sending it now.
+    if bufs.send.has_pending() {
+        match bufs.send.flush(stream) {
+            Ok(()) => {
+                let _ = stream.flush();
+                bufs.send.maybe_shrink(sess.max_buf_size, rng);
             }
+            // Don't propagate — this is a read call; returning
+            // WouldBlock would make the caller wait for readability
+            // when the real bottleneck is writability.  The bytes
+            // stay in the send buffer and will go out on the next attempt
+            // on a best-effort basis.
+            Err(e) if e.is_would_block() => {}
+            Err(e) => return Err(e.into()),
         }
-        let mut budget = sess.frame_budget;
-        loop {
-            if self.read.maybe_compact(MAX_HEADER) {
-                self.read.maybe_shrink_capacity(sess.max_buf_size, rng);
+    }
+    let mut budget = sess.frame_budget;
+    loop {
+        if bufs.read.maybe_compact(MAX_HEADER) {
+            bufs.read.maybe_shrink_capacity(sess.max_buf_size, rng);
+        }
+        // Shrink the fragment reassembly buffer after a large
+        // fragmented message.  Done here (top of loop) rather than
+        // at completion time because the returned Message borrows
+        // from fragment_buf — we can only free the data once the
+        // caller has dropped that borrow and re-entered read_message.
+        if sess.fragment_opcode == 0
+            && bufs.fragment_buf.capacity() > sess.max_buf_size
+            && rng.one_in_eight_odds()
+        {
+            bufs.fragment_buf.clear();
+            bufs.fragment_buf.shrink_to(sess.max_buf_size);
+        }
+
+        // Track how many bytes fill_from reads from the OS.
+        let end_before = bufs.read.filled().len();
+
+        // Parse frame header
+        let (fin, opcode, payload_len) = {
+            bufs.read.fill_from(stream, 2)?;
+            let hdr = bufs.read.pending();
+            let byte0 = hdr[0];
+            let byte1 = hdr[1];
+
+            let rsv = byte0 & RESERVED_MASK;
+            if rsv != 0 {
+                return Err(ConnError::BadReservedBits(rsv));
             }
-            // Shrink the fragment reassembly buffer after a large
-            // fragmented message.  Done here (top of loop) rather than
-            // at completion time because the returned Message borrows
-            // from fragment_buf — we can only free the data once the
-            // caller has dropped that borrow and re-entered read_message.
-            if sess.fragment_opcode == 0
-                && self.fragment_buf.capacity() > sess.max_buf_size
-                && rng.one_in_eight_odds()
-            {
-                self.fragment_buf.clear();
-                self.fragment_buf.shrink_to(sess.max_buf_size);
+
+            let fin = byte0 & FIN != 0;
+            let opcode = byte0 & OPCODE_MASK;
+            let masked = byte1 & MASK_BIT != 0;
+            if masked {
+                return Err(ConnError::MaskedServerFrame);
             }
+            let len_byte = (byte1 & LEN_MASK) as usize;
 
-            // Track how many bytes fill_from reads from the OS.
-            let end_before = self.read.filled().len();
-
-            // Parse frame header
-            let (fin, opcode, payload_len) = {
-                self.read.fill_from(stream, 2)?;
-                let hdr = self.read.pending();
-                let byte0 = hdr[0];
-                let byte1 = hdr[1];
-
-                let rsv = byte0 & RESERVED_MASK;
-                if rsv != 0 {
-                    return Err(ConnError::BadReservedBits(rsv));
+            let (header_size, payload_len) = match len_byte {
+                n @ 0..=125 => (2, n),
+                126 => {
+                    bufs.read.fill_from(stream, 4)?;
+                    let hdr = bufs.read.pending();
+                    let len = u16::from_be_bytes([hdr[2], hdr[3]]) as usize;
+                    if len < 126 {
+                        return Err(ConnError::NonMinimalLength);
+                    }
+                    if len > sess.max_payload {
+                        return Err(ConnError::PayloadTooLarge(len as u64));
+                    }
+                    (4, len)
                 }
-
-                let fin = byte0 & FIN != 0;
-                let opcode = byte0 & OPCODE_MASK;
-                let masked = byte1 & MASK_BIT != 0;
-                if masked {
-                    return Err(ConnError::MaskedServerFrame);
+                127 => {
+                    bufs.read.fill_from(stream, 10)?;
+                    let hdr = bufs.read.pending();
+                    let len = u64::from_be_bytes(hdr[2..10].try_into().unwrap());
+                    if len >> 63 != 0 {
+                        return Err(ConnError::PayloadLengthMsb);
+                    }
+                    if len < 65536 {
+                        return Err(ConnError::NonMinimalLength);
+                    }
+                    if len > sess.max_payload as u64 {
+                        return Err(ConnError::PayloadTooLarge(len));
+                    }
+                    (10, len as usize)
                 }
-                let len_byte = (byte1 & LEN_MASK) as usize;
-
-                let (header_size, payload_len) = match len_byte {
-                    n @ 0..=125 => (2, n),
-                    126 => {
-                        self.read.fill_from(stream, 4)?;
-                        let hdr = self.read.pending();
-                        let len = u16::from_be_bytes([hdr[2], hdr[3]]) as usize;
-                        if len < 126 {
-                            return Err(ConnError::NonMinimalLength);
-                        }
-                        if len > sess.max_payload {
-                            return Err(ConnError::PayloadTooLarge(len as u64));
-                        }
-                        (4, len)
-                    }
-                    127 => {
-                        self.read.fill_from(stream, 10)?;
-                        let hdr = self.read.pending();
-                        let len = u64::from_be_bytes(hdr[2..10].try_into().unwrap());
-                        if len >> 63 != 0 {
-                            return Err(ConnError::PayloadLengthMsb);
-                        }
-                        if len < 65536 {
-                            return Err(ConnError::NonMinimalLength);
-                        }
-                        if len > sess.max_payload as u64 {
-                            return Err(ConnError::PayloadTooLarge(len));
-                        }
-                        (10, len as usize)
-                    }
-                    _ => unreachable!("7-bit value is always 0..=127"),
-                };
-
-                if opcode >= OP_CLOSE {
-                    if !fin {
-                        return Err(ConnError::FragmentedControl);
-                    }
-                    if payload_len > 125 {
-                        return Err(ConnError::ControlPayloadTooLarge(payload_len));
-                    }
-                }
-
-                let frame_size = header_size + payload_len;
-                self.read.fill_from(stream, frame_size)?;
-                self.read.consume(frame_size);
-
-                (fin, opcode, payload_len)
+                _ => unreachable!("7-bit value is always 0..=127"),
             };
 
-            // A small read means data trickled in (one frame); a big
-            // read (or no read at all) means data was already buffered.
-            let bytes_read = self.read.filled().len() - end_before;
-            if bytes_read > 0 && bytes_read <= SMALL_READ_THRESHOLD {
-                sess.flood_score = sess.flood_score.saturating_sub(1);
-            }
-
-            // Flood detection: every frame adds pressure.
-            sess.flood_score += 1;
-            if sess.flood_score > sess.max_flood_score {
-                return Err(ConnError::Flood);
-            }
-
-            let pos = self.read.pos();
-            let payload_range = pos - payload_len..pos;
-
-            match opcode {
-                OP_CONTINUATION => {
-                    if sess.fragment_opcode == 0 {
-                        return Err(ConnError::UnexpectedContinuation);
-                    }
-                    let total = self.fragment_buf.len() + payload_len;
-                    if total > sess.max_payload {
-                        return Err(ConnError::FragmentedMessageTooLarge(total));
-                    }
-                    self.fragment_buf
-                        .extend_from_slice(&self.read.filled()[payload_range]);
-                    if fin {
-                        let opcode = sess.fragment_opcode;
-                        sess.fragment_opcode = 0;
-                        let relief = 1.max(self.fragment_buf.len() / SMALL_READ_THRESHOLD);
-                        sess.flood_score = sess.flood_score.saturating_sub(relief);
-                        return into_message(opcode, &self.fragment_buf).map(Some);
-                    }
+            if opcode >= OP_CLOSE {
+                if !fin {
+                    return Err(ConnError::FragmentedControl);
                 }
-
-                OP_TEXT | OP_BINARY => {
-                    if sess.fragment_opcode != 0 {
-                        return Err(ConnError::DataDuringFragmentation);
-                    }
-                    if fin {
-                        let relief = 1.max(payload_len / SMALL_READ_THRESHOLD);
-                        sess.flood_score = sess.flood_score.saturating_sub(relief);
-                        return into_message(opcode, &self.read.filled()[payload_range]).map(Some);
-                    }
-                    self.fragment_buf.clear();
-                    self.fragment_buf
-                        .extend_from_slice(&self.read.filled()[payload_range]);
-                    sess.fragment_opcode = opcode;
+                if payload_len > 125 {
+                    return Err(ConnError::ControlPayloadTooLarge(payload_len));
                 }
-
-                OP_CLOSE | OP_PING | OP_PONG => {
-                    #[allow(clippy::wildcard_in_or_patterns)]
-                    match opcode {
-                        OP_CLOSE => {
-                            let echo = sess.close_state == CloseState::Open;
-                            sess.close_state = CloseState::Closed;
-                            return handle_close(
-                                stream,
-                                &mut self.send,
-                                rng,
-                                self.read.get(payload_range),
-                                echo,
-                            )
-                            .map(Some);
-                        }
-                        OP_PING | OP_PONG | _ => {
-                            // Pong replies are sent even during CloseSent:
-                            // control frames are not data frames, and most
-                            // peers expect pong responses until the TCP
-                            // connection is torn down.
-                            if opcode == OP_PING {
-                                if self.send.pending_len() < sess.max_buf_size {
-                                    build_frame(
-                                        &mut self.send,
-                                        rng,
-                                        OP_PONG,
-                                        self.read.get(payload_range),
-                                    );
-                                }
-                                self.send.try_flush(stream);
-                            }
-                        }
-                    }
-                }
-
-                _ => return Err(ConnError::UnknownOpcode(opcode)),
             }
 
-            // Budget: yield to the caller after processing too many
-            // frames without producing a message.
-            budget = budget.saturating_sub(1);
-            if budget == 0 {
-                return Ok(None);
+            let frame_size = header_size + payload_len;
+            bufs.read.fill_from(stream, frame_size)?;
+            bufs.read.consume(frame_size);
+
+            (fin, opcode, payload_len)
+        };
+
+        // A small read means data trickled in (one frame); a big
+        // read (or no read at all) means data was already buffered.
+        let bytes_read = bufs.read.filled().len() - end_before;
+        if bytes_read > 0 && bytes_read <= SMALL_READ_THRESHOLD {
+            sess.flood_score = sess.flood_score.saturating_sub(1);
+        }
+
+        // Flood detection: every frame adds pressure.
+        sess.flood_score += 1;
+        if sess.flood_score > sess.max_flood_score {
+            return Err(ConnError::Flood);
+        }
+
+        let pos = bufs.read.pos();
+        let payload_range = pos - payload_len..pos;
+
+        match opcode {
+            OP_CONTINUATION => {
+                if sess.fragment_opcode == 0 {
+                    return Err(ConnError::UnexpectedContinuation);
+                }
+                let total = bufs.fragment_buf.len() + payload_len;
+                if total > sess.max_payload {
+                    return Err(ConnError::FragmentedMessageTooLarge(total));
+                }
+                bufs.fragment_buf
+                    .extend_from_slice(&bufs.read.filled()[payload_range]);
+                if fin {
+                    let opcode = sess.fragment_opcode;
+                    sess.fragment_opcode = 0;
+                    let relief = 1.max(bufs.fragment_buf.len() / SMALL_READ_THRESHOLD);
+                    sess.flood_score = sess.flood_score.saturating_sub(relief);
+                    let buf = &bufs.fragment_buf;
+                    return Ok(Some(match opcode {
+                        OP_TEXT => Message::Text(std::str::from_utf8(buf)?),
+                        _ => Message::Binary(buf),
+                    }));
+                }
             }
+
+            OP_TEXT | OP_BINARY => {
+                if sess.fragment_opcode != 0 {
+                    return Err(ConnError::DataDuringFragmentation);
+                }
+                if fin {
+                    let relief = 1.max(payload_len / SMALL_READ_THRESHOLD);
+                    sess.flood_score = sess.flood_score.saturating_sub(relief);
+                    let buf = &bufs.read.filled()[payload_range];
+                    return Ok(Some(match opcode {
+                        OP_TEXT => Message::Text(std::str::from_utf8(buf)?),
+                        _ => Message::Binary(buf),
+                    }));
+                }
+                bufs.fragment_buf.clear();
+                bufs.fragment_buf
+                    .extend_from_slice(&bufs.read.filled()[payload_range]);
+                sess.fragment_opcode = opcode;
+            }
+
+            OP_CLOSE => {
+                let echo = sess.close_state == CloseState::Open;
+                sess.close_state = CloseState::Closed;
+                return handle_close(
+                    stream,
+                    &mut bufs.send,
+                    rng,
+                    bufs.read.get(payload_range),
+                    echo,
+                )
+                .map(Some);
+            }
+
+            // Pong replies are sent even during CloseSent:
+            // control frames are not data frames, and most
+            // peers expect pong responses until the TCP
+            // connection is torn down.
+            OP_PING => {
+                if bufs.send.pending_len() < sess.max_buf_size {
+                    build_frame(&mut bufs.send, rng, OP_PONG, bufs.read.get(payload_range));
+                }
+                bufs.send.try_flush(stream);
+            }
+
+            OP_PONG => {}
+
+            _ => return Err(ConnError::UnknownOpcode(opcode)),
+        }
+
+        // Budget: yield to the caller after processing too many
+        // frames without producing a message.
+        budget = budget.saturating_sub(1);
+        if budget == 0 {
+            return Ok(None);
         }
     }
 }
@@ -363,6 +358,8 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
     ) -> Result<(), ConnError> {
         self.bufs.clear();
         self.sess.reset();
+        let mut line_ends = [0usize; 64];
+        let mut n_lines = 0;
 
         let key = {
             let mut raw = [0u8; 16];
@@ -404,7 +401,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         let header_end = {
             let mut scan = 0;
             let mut prev_nl: Option<usize> = None;
-            let line_ends = &mut self.bufs.line_ends;
+            let n_lines = &mut n_lines;
             self.bufs
                 .read
                 .read_until::<_, ConnError>(&mut self.stream, MAX_HEADER, |buf| {
@@ -412,7 +409,11 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                     let limit = data.len().min(MAX_HEADER);
                     while let Some(off) = data[scan..limit].iter().position(|&b| b == b'\n') {
                         let nl = scan + off;
-                        line_ends.push(nl);
+                        if *n_lines >= line_ends.len() {
+                            return Err(ConnError::HeadersTooLarge);
+                        }
+                        line_ends[*n_lines] = nl;
+                        *n_lines += 1;
                         if let Some(prev) = prev_nl {
                             let gap = nl - prev;
                             if gap == 1 || (gap == 2 && data[nl - 1] == b'\r') {
@@ -460,7 +461,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
             let mut subprotocol = None;
             let mut line_start = 0;
             let data = self.bufs.read.pending();
-            for &nl in &self.bufs.line_ends {
+            for &nl in &line_ends[..n_lines] {
                 let line = &data[line_start..nl];
                 let line = line.strip_suffix(b"\r").unwrap_or(line);
                 if let Some(colon) = line.iter().position(|&b| b == b':') {
@@ -512,8 +513,6 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
 
         self.bufs.read.consume(header_end);
         self.bufs.read.compact();
-        self.bufs.line_ends.clear();
-        self.bufs.line_ends.shrink_to(32);
 
         Ok(())
     }
@@ -595,14 +594,6 @@ fn validate_recv_close_code(code: u16) -> Result<(), ConnError> {
         1005 | 1006 | 1015 => Err(ConnError::InvalidCloseCode(code)),
         1000..=4999 => Ok(()),
         _ => Err(ConnError::InvalidCloseCode(code)),
-    }
-}
-
-fn into_message<'a>(opcode: u8, buf: &'a [u8]) -> Result<Message<'a>, ConnError> {
-    match opcode {
-        OP_TEXT => Ok(Message::Text(std::str::from_utf8(buf)?)),
-        OP_BINARY => Ok(Message::Binary(buf)),
-        _ => unreachable!("into_message called with non-data opcode {opcode}"),
     }
 }
 

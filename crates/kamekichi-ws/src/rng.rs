@@ -1,6 +1,6 @@
 /// A minimal RNG interface for the operations used by the WebSocket implementation.
 /// This exists to avoid exposing rand_core in the public API, as it isn't at version 1.0 yet,
-/// but this trait is basically a wrapper around [`rand_core::Rng`].
+/// but this trait is basically a wrapper around `rand_core::Rng`.
 pub trait Rng {
     /// Fill `buf` with random bytes.
     fn fill_bytes(&mut self, buf: &mut [u8]);

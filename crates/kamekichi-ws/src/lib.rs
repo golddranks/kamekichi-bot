@@ -105,7 +105,11 @@ impl<'a> ReadStatus<'a> {
 /// A WebSocket client over an arbitrary byte stream.
 pub struct WebSocket<S, R> {
     pub(crate) stream: S,
+    /// I/O buffers.  Split from `sess` so that `read_message` can
+    /// return a [`Message`] borrowing from here while `sess` remains
+    /// free to mutate.
     pub(crate) bufs: Buffers,
+    /// Protocol state (never borrowed by a returned [`Message`]).
     pub(crate) sess: Session,
     pub(crate) rng: R,
 }
@@ -130,10 +134,12 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         if self.sess.close_state == CloseState::Closed {
             return Err(CallerError::Closing.into());
         }
-        match self
-            .bufs
-            .read_message(&mut self.stream, &mut self.sess, &mut self.rng)
-        {
+        match read_message(
+            &mut self.bufs,
+            &mut self.stream,
+            &mut self.sess,
+            &mut self.rng,
+        ) {
             Ok(Some(msg)) => {
                 let now = Instant::now();
                 self.sess.last_activity = Some(now);
@@ -242,7 +248,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
     /// If no frame (pong or otherwise) is received by `deadline`,
     /// the next [`read_message`](Self::read_message) call that
     /// observes silence will return
-    /// [`ConnectionError::PingTimeout`](crate::ConnectionError::PingTimeout).
+    /// [`ConnectionError::PingTimeout`].
     /// Any received frame clears the deadline — the connection is
     /// proven alive regardless of whether the frame is a pong.
     ///
