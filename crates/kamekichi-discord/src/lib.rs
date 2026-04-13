@@ -116,23 +116,23 @@ impl Client {
             .as_slice())
     }
 
-    pub fn send_message(&self, channel_id: u64, content: &str) -> Result<(u16, Option<u64>)> {
+    pub fn send_message(&mut self, channel_id: u64, content: &str) -> Result<Option<u64>> {
         self.http.send_message(channel_id, content)
     }
 
-    pub fn edit_message(&self, channel_id: u64, message_id: u64, content: &str) -> Result<u16> {
+    pub fn edit_message(&mut self, channel_id: u64, message_id: u64, content: &str) -> Result {
         self.http.edit_message(channel_id, message_id, content)
     }
 
-    pub fn add_reaction(&self, channel_id: u64, message_id: u64, emoji: &str) -> Result<u16> {
+    pub fn add_reaction(&mut self, channel_id: u64, message_id: u64, emoji: &str) -> Result {
         self.http.add_reaction(channel_id, message_id, emoji)
     }
 
-    pub fn add_role(&self, guild_id: u64, user_id: u64, role_id: u64) -> Result<u16> {
+    pub fn add_role(&mut self, guild_id: u64, user_id: u64, role_id: u64) -> Result {
         self.http.add_role(guild_id, user_id, role_id)
     }
 
-    pub fn remove_role(&self, guild_id: u64, user_id: u64, role_id: u64) -> Result<u16> {
+    pub fn remove_role(&mut self, guild_id: u64, user_id: u64, role_id: u64) -> Result {
         self.http.remove_role(guild_id, user_id, role_id)
     }
 }

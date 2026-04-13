@@ -8,7 +8,7 @@ use serde_json::value::RawValue;
 
 use kamekichi_ws as ws;
 use rand_core::SeedableRng;
-use rand_xoshiro::Xoshiro128PlusPlus;
+use rand_pcg::Pcg64Mcg;
 
 use crate::heartbeat::HeartbeatState;
 use crate::{Error, Result, TlsStream, message as msg};
@@ -48,7 +48,7 @@ struct HelloData {
 
 /// An active gateway connection with heartbeat and session state.
 pub struct Session {
-    ws: ws::WebSocket<TlsStream, Xoshiro128PlusPlus>,
+    ws: ws::WebSocket<TlsStream, Pcg64Mcg>,
     heartbeat: HeartbeatState,
     pub(crate) data: SessData,
     /// Reusable buffer for outgoing gateway payloads (heartbeats, identify).
@@ -119,7 +119,17 @@ impl std::fmt::Display for PollError {
     }
 }
 
-impl std::error::Error for PollError {}
+impl std::error::Error for PollError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PollError::Resume { error, .. } => Some(error),
+            PollError::Reconnect(e) => Some(e),
+            PollError::Fatal(e) => Some(e),
+            PollError::Transient(e) => Some(e),
+            PollError::NotConnected => None,
+        }
+    }
+}
 
 /// Returns `true` for gateway close codes that indicate a configuration
 /// error — reconnecting with the same parameters will fail again.
@@ -183,6 +193,7 @@ fn classify_error(error: &Error) -> ErrorClass {
         | HeadersTooLarge
         | MalformedChunk
         | RetriesExhausted { .. }
+        | ApiError { .. }
         | BadHeartbeatInterval(_)
         | BadResumeUrl
         | BadToken
@@ -262,8 +273,11 @@ impl Session {
             tcp.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
             let mut seed = [0u8; 8];
             getrandom::fill(&mut seed)?;
-            ws::WebSocket::new(Xoshiro128PlusPlus::seed_from_u64(u64::from_ne_bytes(seed)))
-                .connect(rustls::StreamOwned::new(tls_conn, tcp), url.host, &path)?
+            ws::WebSocket::new(Pcg64Mcg::seed_from_u64(u64::from_ne_bytes(seed))).connect(
+                rustls::StreamOwned::new(tls_conn, tcp),
+                url.host,
+                &path,
+            )?
         };
 
         // Receive HELLO and extract heartbeat interval

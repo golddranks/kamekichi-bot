@@ -17,6 +17,7 @@ pub enum Error {
     HeadersTooLarge,
     MalformedChunk,
     RetriesExhausted { status: u16 },
+    ApiError { status: u16 },
     Reconnect,
     InvalidSession { resumable: bool },
     ConnectionZombied,
@@ -53,6 +54,9 @@ impl std::fmt::Display for Error {
             Error::RetriesExhausted { status } => {
                 write!(f, "retries exhausted (last status {status})")
             }
+            Error::ApiError { status } => {
+                write!(f, "API error (status {status})")
+            }
             Error::Reconnect => write!(f, "reconnect requested"),
             Error::InvalidSession { resumable } => {
                 write!(f, "invalid session (resumable: {resumable})")
@@ -85,7 +89,18 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Io(e) => Some(e),
+            Error::Tls(e) => Some(e),
+            Error::Json(e) => Some(e),
+            Error::Rng(e) => Some(e),
+            Error::WebSocket(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
@@ -123,8 +138,3 @@ impl From<kamekichi_ws::Error> for Error {
     }
 }
 
-impl From<kamekichi_ws::ConnectionError> for Error {
-    fn from(e: kamekichi_ws::ConnectionError) -> Self {
-        Error::WebSocket(kamekichi_ws::Error::Reconnect(e))
-    }
-}

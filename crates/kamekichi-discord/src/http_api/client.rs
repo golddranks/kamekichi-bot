@@ -1,24 +1,45 @@
-use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::ops::Not;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{Error, TlsStream};
 
-// TODOs
-// constify the HTTP status codes
-
 const MAX_RESPONSE_BODY: usize = 16 * 1024 * 1024; // 16 MiB
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PREEMPTIVE_WAIT: Duration = Duration::from_secs(10);
 
+struct RateState {
+    remaining: u32,
+    resets_at: Instant,
+}
+
+struct RawResponse {
+    status: u16,
+    retry_after: Option<f64>,
+    body: String,
+    keep_alive: bool,
+    bucket: Option<String>,
+    remaining: Option<u32>,
+    reset_after: Option<f64>,
+}
+
+/// Low-level HTTP/1.1 client for the Discord REST API.
+///
+/// Manages a single persistent TLS connection, rate-limit bucket tracking,
+/// and retry logic. Not meant for direct use — [`super::HttpApi`] provides
+/// the typed endpoint wrappers.
 pub struct Client {
-    pub(crate) host: String,
-    pub(crate) token: String,
-    pub(crate) user_agent: String,
-    pub(crate) tls_config: Arc<rustls::ClientConfig>,
-    pub(crate) conn: RefCell<Option<TlsStream>>,
+    host: String,
+    token: String,
+    user_agent: String,
+    tls_config: Arc<rustls::ClientConfig>,
+    conn: Option<TlsStream>,
+    buckets: HashMap<String, RateState>,
+    route_buckets: HashMap<String, String>,
 }
 
 #[derive(Clone, Copy)]
@@ -32,7 +53,7 @@ pub enum Method {
 
 impl Method {
     fn is_idempotent(&self) -> bool {
-        matches!(self, Method::Get | Method::Delete | Method::Patch)
+        matches!(self, Method::Get | Method::Put | Method::Delete)
     }
 }
 
@@ -49,16 +70,105 @@ impl Display for Method {
 }
 
 impl Client {
+    pub(crate) fn new(
+        tls_config: Arc<rustls::ClientConfig>,
+        token: String,
+        user_agent: String,
+    ) -> Self {
+        Self {
+            host: "discord.com".to_string(),
+            tls_config,
+            token,
+            user_agent,
+            conn: None,
+            buckets: HashMap::new(),
+            route_buckets: HashMap::new(),
+        }
+    }
+
+    /// Extract a route key for rate-limit bucketing.
+    /// Replaces numeric path segments (snowflakes) with `:id`, keeping the
+    /// first two segments (e.g. `/api/v10`) and major parameters intact
+    /// through the bucket ID Discord returns.
+    fn route_key(method: Method, path: &str) -> String {
+        use std::fmt::Write as _;
+        let mut key = String::with_capacity(path.len() + 8);
+        let _ = write!(key, "{method} ");
+        for (i, seg) in path.split('/').enumerate() {
+            if i > 0 {
+                key.push('/');
+            }
+            if seg.chars().all(|c| c.is_ascii_digit()) && !seg.is_empty() {
+                key.push_str(":id");
+            } else {
+                key.push_str(seg);
+            }
+        }
+        key
+    }
+
+    /// Sleep until the known rate-limit bucket resets, if remaining is 0.
+    /// Caps the wait at [`MAX_PREEMPTIVE_WAIT`] to avoid blocking forever
+    /// on stale state.
+    fn preemptive_wait(&self, route_key: &str) {
+        let Some(bucket_id) = self.route_buckets.get(route_key) else {
+            return;
+        };
+        let Some(state) = self.buckets.get(bucket_id) else {
+            return;
+        };
+        if state.remaining == 0 {
+            let now = Instant::now();
+            if state.resets_at > now {
+                let wait = state.resets_at - now;
+                if wait <= MAX_PREEMPTIVE_WAIT {
+                    std::thread::sleep(wait);
+                }
+            }
+        }
+    }
+
+    /// Update bucket state from `X-RateLimit-*` response headers.
+    fn record_rate_limit(&mut self, route_key: &str, resp: &RawResponse) {
+        let Some(ref bucket_id) = resp.bucket else {
+            return;
+        };
+        self.route_buckets
+            .insert(route_key.to_string(), bucket_id.clone());
+
+        if let (Some(remaining), Some(reset_after)) = (resp.remaining, resp.reset_after) {
+            self.buckets.insert(
+                bucket_id.clone(),
+                RateState {
+                    remaining,
+                    resets_at: Instant::now() + Duration::from_secs_f64(reset_after),
+                },
+            );
+        }
+    }
+
+    /// Execute an HTTP request with rate-limit handling and retries.
+    ///
+    /// - 429: retries after `Retry-After` (clamped to 60s), up to 4 attempts.
+    /// - 5xx + idempotent: exponential backoff (1s, 2s, 4s), up to 4 attempts.
+    /// - 5xx + non-idempotent: returns immediately (no retry).
+    /// - 4xx / 2xx: returns immediately.
     pub fn request(
-        &self,
+        &mut self,
         method: Method,
         path: &str,
         body: Option<&str>,
     ) -> Result<(u16, String), Error> {
         const MAX_ATTEMPTS: u32 = 4;
+        let route_key = Self::route_key(method, path);
         let mut last_status = 0;
         for attempt in 0..MAX_ATTEMPTS {
-            let (status, retry_after, resp_body) = self.request_once(method, path, body)?;
+            self.preemptive_wait(&route_key);
+            let resp = self.request_once(method, path, body)?;
+            self.record_rate_limit(&route_key, &resp);
+            let RawResponse {
+                status, body: resp_body, retry_after, ..
+            } = resp;
             if status == 429 {
                 last_status = status;
                 if attempt + 1 < MAX_ATTEMPTS {
@@ -68,15 +178,15 @@ impl Client {
                 continue;
             }
             if status >= 500 {
-                last_status = status;
-                if attempt + 1 < MAX_ATTEMPTS {
-                    let wait = (1u64 << attempt).min(8) as f64;
-                    std::thread::sleep(Duration::from_secs_f64(wait));
+                if method.is_idempotent() {
+                    last_status = status;
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        let wait = (1u64 << attempt).min(8) as f64;
+                        std::thread::sleep(Duration::from_secs_f64(wait));
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if status >= 400 {
-                eprintln!("Discord API error {status}: {method} {path}\n{resp_body}");
+                return Ok((status, resp_body));
             }
             return Ok((status, resp_body));
         }
@@ -89,35 +199,39 @@ impl Client {
         let server_name = rustls::pki_types::ServerName::try_from(self.host.as_str())?.to_owned();
         let tls_conn = rustls::ClientConnection::new(self.tls_config.clone(), server_name)?;
         let tcp = TcpStream::connect((self.host.as_str(), 443))?;
-        tcp.set_read_timeout(Some(Duration::from_secs(30)))?;
+        tcp.set_read_timeout(Some(REQUEST_TIMEOUT))?;
+        tcp.set_write_timeout(Some(REQUEST_TIMEOUT))?;
         Ok(rustls::StreamOwned::new(tls_conn, tcp))
     }
 
+    /// Single-attempt request. Reuses the cached connection if available,
+    /// retrying once with a fresh connection for idempotent methods on I/O
+    /// errors (stale keep-alive).
     fn request_once(
-        &self,
+        &mut self,
         method: Method,
         path: &str,
         body: Option<&str>,
-    ) -> Result<(u16, Option<f64>, String), Error> {
-        let mut conn = self.conn.borrow_mut();
-        let mut stream = match conn.take() {
+    ) -> Result<RawResponse, Error> {
+        let mut stream = match self.conn.take() {
             Some(s) => s,
             None => self.connect()?,
         };
 
         match send_and_read(
             &mut stream,
+            &self.host,
             &self.token,
             &self.user_agent,
             method,
             path,
             body,
         ) {
-            Ok((status, retry_after, resp_body, keep_alive)) => {
-                if keep_alive {
-                    *conn = Some(stream);
+            Ok(resp) => {
+                if resp.keep_alive {
+                    self.conn = Some(stream);
                 }
-                Ok((status, retry_after, resp_body))
+                Ok(resp)
             }
             Err(e) => {
                 // Stale connection — retry once with a fresh one, but only
@@ -128,34 +242,39 @@ impl Client {
                 if method.is_idempotent().not() {
                     return Err(e);
                 }
-                eprintln!("Stale connection ({e}), retrying with fresh connection");
                 let mut stream = self.connect()?;
-                let (status, retry_after, resp_body, keep_alive) = send_and_read(
+                let resp = send_and_read(
                     &mut stream,
+                    &self.host,
                     &self.token,
                     &self.user_agent,
                     method,
                     path,
                     body,
                 )?;
-                if keep_alive {
-                    *conn = Some(stream);
+                if resp.keep_alive {
+                    self.conn = Some(stream);
                 }
-                Ok((status, retry_after, resp_body))
+                Ok(resp)
             }
         }
     }
 }
 
+/// Write an HTTP/1.1 request and read the full response.
+///
+/// Parses status, headers (including rate-limit and framing headers),
+/// and body. Supports fixed `Content-Length`, chunked `Transfer-Encoding`,
+/// and connectionless framing (read to EOF).
 fn send_and_read(
     stream: &mut (impl Read + Write),
+    host: &str,
     token: &str,
     user_agent: &str,
     method: Method,
     path: &str,
     body: Option<&str>,
-) -> Result<(u16, Option<f64>, String, bool), Error> {
-    let host = "discord.com";
+) -> Result<RawResponse, Error> {
 
     write!(
         stream,
@@ -215,6 +334,9 @@ fn send_and_read(
     let mut keep_alive = true;
     let mut chunked = false;
     let mut content_length: Option<usize> = None;
+    let mut rl_bucket: Option<String> = None;
+    let mut rl_remaining: Option<u32> = None;
+    let mut rl_reset_after: Option<f64> = None;
 
     let mut pos = first_line_end + 2; // skip past first line's \r\n
     while pos < header_end {
@@ -231,10 +353,7 @@ fn send_and_read(
         let name = &line[..colon];
         let val = line[colon + 1..].trim_ascii();
 
-        if retry_after.is_none()
-            && (name.eq_ignore_ascii_case(b"retry-after")
-                || name.eq_ignore_ascii_case(b"x-ratelimit-reset-after"))
-        {
+        if retry_after.is_none() && name.eq_ignore_ascii_case(b"retry-after") {
             retry_after = std::str::from_utf8(val)
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok());
@@ -244,22 +363,29 @@ fn send_and_read(
             chunked = val.windows(7).any(|w| w.eq_ignore_ascii_case(b"chunked"));
         } else if name.eq_ignore_ascii_case(b"content-length") {
             content_length = std::str::from_utf8(val).ok().and_then(|s| s.parse().ok());
+        } else if name.eq_ignore_ascii_case(b"x-ratelimit-bucket") {
+            rl_bucket = std::str::from_utf8(val).ok().map(|s| s.to_string());
+        } else if name.eq_ignore_ascii_case(b"x-ratelimit-remaining") {
+            rl_remaining = std::str::from_utf8(val).ok().and_then(|s| s.parse().ok());
+        }
+        if rl_reset_after.is_none() && name.eq_ignore_ascii_case(b"x-ratelimit-reset-after") {
+            rl_reset_after = std::str::from_utf8(val).ok().and_then(|s| s.parse().ok());
         }
     }
 
     // Body bytes already buffered past the header delimiter
     let body_start = header_end + 4;
-    let leftover = buf[body_start..].to_vec();
+    buf.drain(..body_start);
 
     let resp_body = if chunked {
-        read_chunked_body(stream, leftover)?
+        read_chunked_body(stream, buf)?
     } else if let Some(len) = content_length {
-        read_fixed_body(stream, leftover, len)?
+        read_fixed_body(stream, buf, len)?
     } else if status == 204 || status == 304 {
         Vec::new()
     } else {
         // No framing info — read to end (connection not reusable)
-        let mut body = leftover;
+        let mut body = buf;
         let mut tmp = [0u8; 4096];
         loop {
             let n = stream.read(&mut tmp)?;
@@ -272,13 +398,31 @@ fn send_and_read(
             }
         }
         let resp = String::from_utf8(body).map_err(|_| Error::InvalidUtf8)?;
-        return Ok((status, retry_after, resp, false));
+        return Ok(RawResponse {
+            status,
+            retry_after,
+            body: resp,
+            keep_alive: false,
+            bucket: rl_bucket,
+            remaining: rl_remaining,
+            reset_after: rl_reset_after,
+        });
     };
 
     let resp = String::from_utf8(resp_body).map_err(|_| Error::InvalidUtf8)?;
-    Ok((status, retry_after, resp, keep_alive))
+    Ok(RawResponse {
+        status,
+        retry_after,
+        body: resp,
+        keep_alive,
+        bucket: rl_bucket,
+        remaining: rl_remaining,
+        reset_after: rl_reset_after,
+    })
 }
 
+/// Read exactly `content_length` bytes, starting from any leftover
+/// data already buffered past the headers.
 fn read_fixed_body(
     stream: &mut impl Read,
     leftover: Vec<u8>,
@@ -298,6 +442,10 @@ fn read_fixed_body(
     Ok(body)
 }
 
+/// Decode a chunked transfer-encoded body (RFC 7230 §4.1).
+///
+/// Handles chunk extensions (`;`-separated), trailer headers, and
+/// compacts the internal buffer when consumed data exceeds 8 KiB.
 fn read_chunked_body(stream: &mut impl Read, leftover: Vec<u8>) -> Result<Vec<u8>, Error> {
     let mut buf = leftover;
     let mut pos = 0;
@@ -364,6 +512,9 @@ fn read_chunked_body(stream: &mut impl Read, leftover: Vec<u8>) -> Result<Vec<u8
         }
 
         result.extend_from_slice(&buf[pos..pos + size]);
+        if buf[pos + size..pos + need] != *b"\r\n" {
+            return Err(Error::MalformedChunk);
+        }
         pos += need;
 
         if pos > 8192 {
@@ -376,12 +527,13 @@ fn read_chunked_body(stream: &mut impl Read, leftover: Vec<u8>) -> Result<Vec<u8
     Ok(result)
 }
 
+/// Percent-encode a string using the RFC 3986 unreserved character set.
 pub fn percent_encode(s: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = String::new();
+    let mut out = String::with_capacity(s.len());
     for &byte in s.as_bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' | b'@' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(byte as char);
             }
             _ => {
@@ -434,16 +586,15 @@ mod tests {
             "HTTP/1.1 {status} OK\r\n\
              Content-Length: {len}\r\n\
              {headers}\
-             \r\n\
-             {body}",
+             \r\n{body}",
             len = body.len(),
         )
         .into_bytes()
     }
 
-    fn do_request(response: Vec<u8>) -> Result<(u16, Option<f64>, String, bool), Error> {
+    fn do_request(response: Vec<u8>) -> Result<RawResponse, Error> {
         let mut stream = MockStream::new(response);
-        send_and_read(&mut stream, "tok", "test-agent", Method::Get, "/test", None)
+        send_and_read(&mut stream, "discord.com", "tok", "test-agent", Method::Get, "/test", None)
     }
 
     // -- Fixed body --
@@ -451,10 +602,10 @@ mod tests {
     #[test]
     fn fixed_body_happy_path() {
         let resp = http_response(200, "", r#"{"ok":true}"#);
-        let (status, _, body, keep_alive) = do_request(resp).unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, r#"{"ok":true}"#);
-        assert!(keep_alive);
+        let r = do_request(resp).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, r#"{"ok":true}"#);
+        assert!(r.keep_alive);
     }
 
     #[test]
@@ -475,9 +626,9 @@ mod tests {
                      6\r\n world\r\n\
                      0\r\n\r\n"
             .to_vec();
-        let (status, _, body, _) = do_request(resp).unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "hello world");
+        let r = do_request(resp).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, "hello world");
     }
 
     #[test]
@@ -502,9 +653,9 @@ mod tests {
                      \r\n\
                      ok"
         .to_vec();
-        let (status, _, body, _) = do_request(resp).unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "ok");
+        let r = do_request(resp).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, "ok");
     }
 
     // -- Connection: close --
@@ -512,8 +663,7 @@ mod tests {
     #[test]
     fn connection_close_header() {
         let resp = http_response(200, "Connection: close\r\n", "ok");
-        let (_, _, _, keep_alive) = do_request(resp).unwrap();
-        assert!(!keep_alive);
+        assert!(!do_request(resp).unwrap().keep_alive);
     }
 
     // -- 204 No Content --
@@ -521,9 +671,9 @@ mod tests {
     #[test]
     fn no_content_204() {
         let resp = b"HTTP/1.1 204 No Content\r\n\r\n".to_vec();
-        let (status, _, body, _) = do_request(resp).unwrap();
-        assert_eq!(status, 204);
-        assert!(body.is_empty());
+        let r = do_request(resp).unwrap();
+        assert_eq!(r.status, 204);
+        assert!(r.body.is_empty());
     }
 
     // -- Invalid UTF-8 --
@@ -544,9 +694,9 @@ mod tests {
     #[test]
     fn retry_after_parsed() {
         let resp = http_response(429, "Retry-After: 1.5\r\n", "{}");
-        let (status, retry_after, _, _) = do_request(resp).unwrap();
-        assert_eq!(status, 429);
-        assert_eq!(retry_after, Some(1.5));
+        let r = do_request(resp).unwrap();
+        assert_eq!(r.status, 429);
+        assert_eq!(r.retry_after, Some(1.5));
     }
 
     // -- Malformed status --

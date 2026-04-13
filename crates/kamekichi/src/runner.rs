@@ -380,8 +380,7 @@ fn execute_actions(
                     continue;
                 };
                 match discord.send_message(channel_id, &content) {
-                    Ok((status, _)) if (200..300).contains(&status) => {}
-                    Ok((status, _)) => eprintln!("Failed to send message (HTTP {status})"),
+                    Ok(_) => {}
                     Err(e) => eprintln!("Failed to send message: {e}"),
                 }
             }
@@ -399,8 +398,7 @@ fn execute_actions(
                     continue;
                 };
                 match discord.edit_message(channel_id, message_id, &content) {
-                    Ok(status) if (200..300).contains(&status) => {}
-                    Ok(status) => eprintln!("Failed to edit message (HTTP {status})"),
+                    Ok(()) => {}
                     Err(e) => eprintln!("Failed to edit message: {e}"),
                 }
             }
@@ -414,10 +412,7 @@ fn execute_actions(
                     continue;
                 };
                 match discord.add_role(guild_id, user_id, role_id) {
-                    Ok(status) if (200..300).contains(&status) => {
-                        eprintln!("Assigned role {role_id} to {user_id}")
-                    }
-                    Ok(status) => eprintln!("Failed to assign role (HTTP {status})"),
+                    Ok(()) => eprintln!("Assigned role {role_id} to {user_id}"),
                     Err(e) => eprintln!("Failed to assign role: {e}"),
                 }
             }
@@ -431,10 +426,7 @@ fn execute_actions(
                     continue;
                 };
                 match discord.remove_role(guild_id, user_id, role_id) {
-                    Ok(status) if (200..300).contains(&status) => {
-                        eprintln!("Removed role {role_id} from {user_id}")
-                    }
-                    Ok(status) => eprintln!("Failed to remove role (HTTP {status})"),
+                    Ok(()) => eprintln!("Removed role {role_id} from {user_id}"),
                     Err(e) => eprintln!("Failed to remove role: {e}"),
                 }
             }
@@ -452,8 +444,7 @@ fn execute_actions(
                     continue;
                 };
                 match discord.add_reaction(channel_id, message_id, &emoji) {
-                    Ok(status) if (200..300).contains(&status) => {}
-                    Ok(status) => eprintln!("Failed to add reaction (HTTP {status})"),
+                    Ok(()) => {}
                     Err(e) => eprintln!("Failed to add reaction: {e}"),
                 }
             }
@@ -481,7 +472,7 @@ fn execute_actions(
                     }
                     let msg_id = existing.message_id;
                     match discord.edit_message(channel_id, msg_id, &content) {
-                        Ok(status) if (200..300).contains(&status) => {
+                        Ok(()) => {
                             eprintln!("Managed message '{name}' updated");
                             state.managed.insert(
                                 name.to_string(),
@@ -494,14 +485,11 @@ fn execute_actions(
                             registry.normalize(&state.channels, &state.roles, &state.managed);
                             save_state(state);
                         }
-                        Ok(status) => {
-                            eprintln!("Failed to update managed message '{name}' (HTTP {status})")
-                        }
                         Err(e) => eprintln!("Failed to update managed message '{name}': {e}"),
                     }
                 } else {
                     match discord.send_message(channel_id, &content) {
-                        Ok((status, Some(msg_id))) if (200..300).contains(&status) => {
+                        Ok(Some(msg_id)) => {
                             eprintln!("Managed message '{name}' posted as {msg_id}");
                             state.managed.insert(
                                 name.to_string(),
@@ -514,10 +502,9 @@ fn execute_actions(
                             registry.normalize(&state.channels, &state.roles, &state.managed);
                             save_state(state);
                         }
-                        Ok((status, _)) if !(200..300).contains(&status) => {
-                            eprintln!("Failed to post managed message '{name}' (HTTP {status})")
+                        Ok(None) => {
+                            eprintln!("Failed to get message ID for managed message '{name}'")
                         }
-                        Ok(_) => eprintln!("Failed to get message ID for managed message '{name}'"),
                         Err(e) => eprintln!("Failed to post managed message '{name}': {e}"),
                     }
                 }

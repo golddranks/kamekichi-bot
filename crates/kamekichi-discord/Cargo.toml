@@ -14,4 +14,4 @@ webpki-roots = "1.0.6"
 serde_json = { version = "1.0.149", features = ["raw_value"] }
 getrandom = "0.4.2"
 rand_core = "0.10.0"
-rand_xoshiro = "0.8.0"
+rand_pcg = "0.10.1"
