@@ -61,7 +61,7 @@ impl ReadBuf {
 
     /// Advance the read cursor past `n` bytes of pending data.
     pub fn consume(&mut self, n: usize) {
-        debug_assert!(self.start + n <= self.end);
+        assert!(self.start + n <= self.end);
         self.start += n;
     }
 
