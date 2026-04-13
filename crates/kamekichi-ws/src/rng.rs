@@ -1,12 +1,16 @@
-/// A trait for the random number generator used by the WebSocket implementation.
-/// This is basically a wrapper around [`rand_core::Rng`], but as rand_core is
-/// not at version 1.0, so we don't want to have its types in public API.
+/// A minimal RNG interface for the operations used by the WebSocket implementation.
+/// This exists to avoid exposing rand_core in the public API, as it isn't at version 1.0 yet,
+/// but this trait is basically a wrapper around [`rand_core::Rng`].
 pub trait Rng {
     /// Fill `buf` with random bytes.
     fn fill_bytes(&mut self, buf: &mut [u8]);
     /// Return a random `u32`.
-    fn next_u32(&mut self) -> u32;
-    /// Return `true` with roughly 1-in-8 probability.
+    fn next_u32(&mut self) -> u32 {
+        let mut buf = [0u8; 4];
+        self.fill_bytes(&mut buf);
+        u32::from_le_bytes(buf)
+    }
+    /// Return `true` with 1-in-8 probability.
     fn one_in_eight_odds(&mut self) -> bool {
         self.next_u32() & 0b111 == 0
     }

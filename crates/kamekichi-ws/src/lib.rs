@@ -4,6 +4,25 @@
 //!
 //! Works with any stream implementing [`std::io::Read`] + [`std::io::Write`]
 //! — blocking, non-blocking, TCP, or TLS. No async runtime needed.
+//!
+//! # Connection lifecycle
+//!
+//! 1. **Create** — [`WebSocket::new`] allocates buffers (no I/O).
+//!    Chain [`max_payload`](WebSocket::max_payload) /
+//!    [`max_buf_size`](WebSocket::max_buf_size) to configure limits.
+//! 2. **Connect** — [`connect`](WebSocket::connect) (or
+//!    [`try_connect`](WebSocket::try_connect)) performs the HTTP upgrade
+//!    handshake.  Pass extra headers with
+//!    [`connect_with_headers`](WebSocket::connect_with_headers).
+//! 3. **Message loop** — [`read_message`](WebSocket::read_message) and
+//!    [`send_text`](WebSocket::send_text) /
+//!    [`send_binary`](WebSocket::send_binary).
+//! 4. **Close** — [`send_close`](WebSocket::send_close), then keep
+//!    calling [`read_message`](WebSocket::read_message) until
+//!    [`Message::Close`] arrives.
+//! 5. **Reuse** — [`disconnect`](WebSocket::disconnect) returns the
+//!    streamless `WebSocket` and the stream separately; the `WebSocket`
+//!    can be reconnected without reallocating.
 
 mod error;
 mod read_buf;
@@ -27,6 +46,8 @@ const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 /// Default maximum payload size: 16 MiB.
 pub const DEFAULT_MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 /// Default target buffer capacity: 1 MiB.
+/// This can be momentarily exceeded while reading a large payload,
+/// but will be reclaimed later.
 pub const DEFAULT_MAX_BUF_SIZE: usize = 1024 * 1024;
 const MAX_HEADER: usize = 8192;
 /// Maximum wire size of a single control frame (2-byte header + 125-byte
@@ -132,6 +153,11 @@ struct Session {
     control_flood_score: usize,
     /// Threshold above which [`control_flood_score`] triggers an error.
     max_control_flood_score: usize,
+    /// Comma-joined subprotocol tokens to send in `Sec-WebSocket-Protocol`.
+    /// `None` means no subprotocol negotiation.
+    subprotocols: Option<String>,
+    /// The subprotocol selected by the server during the handshake.
+    negotiated_subprotocol: Option<String>,
 }
 
 /// A WebSocket client over an arbitrary byte stream.
@@ -346,7 +372,7 @@ impl Buffers {
 
 impl<S: Read + Write, R: Rng> WebSocket<S, R> {
     /// Run the WebSocket opening handshake on the underlying stream.
-    fn handshake(&mut self, host: &str, path: &str) -> Result<(), Error> {
+    fn handshake(&mut self, host: &str, path: &str, headers: &[(&str, &str)]) -> Result<(), Error> {
         self.bufs.read.clear();
         self.bufs.send.clear();
         self.bufs.line_ends.clear();
@@ -354,6 +380,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         self.sess.fragment_opcode = 0;
         self.sess.close_state = CloseState::Open;
         self.sess.control_flood_score = 0;
+        self.sess.negotiated_subprotocol = None;
 
         let key = {
             let mut raw = [0u8; 16];
@@ -376,10 +403,17 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                  Upgrade: websocket\r\n\
                  Connection: Upgrade\r\n\
                  Sec-WebSocket-Key: {key}\r\n\
-                 Sec-WebSocket-Version: 13\r\n\
-                 \r\n"
+                 Sec-WebSocket-Version: 13\r\n"
             )
             .expect("write to Vec cannot fail");
+            if let Some(ref protos) = self.sess.subprotocols {
+                write!(buf, "Sec-WebSocket-Protocol: {protos}\r\n")
+                    .expect("write to Vec cannot fail");
+            }
+            for &(name, value) in headers {
+                write!(buf, "{name}: {value}\r\n").expect("write to Vec cannot fail");
+            }
+            buf.extend_from_slice(b"\r\n");
             self.stream.write_all(buf)?;
             self.bufs.send.clear();
             self.stream.flush()?;
@@ -435,6 +469,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
             let mut accept = None;
             let mut has_upgrade = false;
             let mut has_connection = false;
+            let mut subprotocol = None;
             let mut line_start = 0;
             let data = self.bufs.read.as_slice();
             for &nl in &self.bufs.line_ends {
@@ -453,6 +488,8 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                         has_connection |= value
                             .split(|&b| b == b',')
                             .any(|t| t.trim_ascii().eq_ignore_ascii_case(b"upgrade"));
+                    } else if name.eq_ignore_ascii_case(b"sec-websocket-protocol") {
+                        subprotocol = subprotocol.or(Some(value));
                     }
                 }
                 line_start = nl + 1;
@@ -467,6 +504,21 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
             }
             if !has_connection {
                 return Err(ConnectionError::MissingConnection.into());
+            }
+
+            // RFC 6455 §4.2.2: if the server sends Sec-WebSocket-Protocol,
+            // it must be one of the values the client offered.
+            if let Some(selected) = subprotocol {
+                let selected = std::str::from_utf8(selected)?;
+                match self.sess.subprotocols {
+                    Some(ref offered) => {
+                        if !offered.split(',').any(|t| t.trim() == selected) {
+                            return Err(ConnectionError::InvalidSubprotocol.into());
+                        }
+                        self.sess.negotiated_subprotocol = Some(selected.to_owned());
+                    }
+                    None => return Err(ConnectionError::InvalidSubprotocol.into()),
+                }
             }
         }
 
@@ -644,7 +696,7 @@ fn build_frame(send: &mut SendBuf, rng: &mut impl Rng, opcode: u8, payload: &[u8
 
     let buf = send.last_mut(payload.len());
     for (i, b) in buf.iter_mut().enumerate() {
-        *b ^= mask[i & 3];
+        *b ^= mask[i & 3]; // TODO: mask 4 bytes at atime
     }
 }
 
@@ -745,6 +797,8 @@ impl<R: Rng> WebSocket<(), R> {
                 control_frame_budget: usize::MAX,
                 control_flood_score: 0,
                 max_control_flood_score: 1000,
+                subprotocols: None,
+                negotiated_subprotocol: None,
             },
             rng,
         }
@@ -774,14 +828,47 @@ impl<R: Rng> WebSocket<(), R> {
         host: &str,
         path: &str,
     ) -> Result<WebSocket<S, R>, (Error, Self, S)> {
+        self.try_connect_with_headers(stream, host, path, &[])
+    }
+
+    /// Like [`try_connect`](Self::try_connect), but sends additional
+    /// HTTP headers during the opening handshake.
+    ///
+    /// Each `(name, value)` pair is written as a header line after the
+    /// standard WebSocket headers.  Both name and value are validated
+    /// to reject CR/LF (preventing header injection).
+    ///
+    /// ```rust,ignore
+    /// let ws = WebSocket::new(rng)
+    ///     .try_connect_with_headers(stream, "example.com", "/ws", &[
+    ///         ("Authorization", "Bearer tok_xxx"),
+    ///         ("Origin", "https://example.com"),
+    ///     ])?;
+    /// ```
+    #[allow(clippy::result_large_err)]
+    pub fn try_connect_with_headers<S: Read + Write>(
+        self,
+        stream: S,
+        host: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<WebSocket<S, R>, (Error, Self, S)> {
         if let Err(e) = validate_header_value(host) {
             return Err((e.into(), self, stream));
         }
         if let Err(e) = validate_header_value(path) {
             return Err((e.into(), self, stream));
         }
+        for &(name, value) in headers {
+            if let Err(e) = validate_header_value(name) {
+                return Err((e.into(), self, stream));
+            }
+            if let Err(e) = validate_header_value(value) {
+                return Err((e.into(), self, stream));
+            }
+        }
         let mut ws = self.with_stream(stream);
-        if let Err(e) = ws.handshake(host, path) {
+        if let Err(e) = ws.handshake(host, path, headers) {
             let (ws, stream) = ws.disconnect();
             return Err((e, ws, stream));
         }
@@ -793,6 +880,12 @@ impl<R: Rng> WebSocket<(), R> {
     /// Sends an HTTP/1.1 upgrade request to `GET {path}` on `{host}`, reads
     /// the server's response, and validates the `101 Switching Protocols`
     /// status and `Sec-WebSocket-Accept` header per RFC 6455 §4.
+    ///
+    /// `host` is sent as-is in the `Host` header — include a port when
+    /// it differs from the default for the scheme (e.g. `"example.com:8443"`).
+    ///
+    /// To send additional headers (e.g. `Authorization`), use
+    /// [`connect_with_headers`](Self::connect_with_headers).
     ///
     /// On success the returned WebSocket is ready for framed messaging via
     /// [`read_message`](WebSocket::read_message) and
@@ -808,12 +901,37 @@ impl<R: Rng> WebSocket<(), R> {
     ) -> Result<WebSocket<S, R>, Error> {
         self.try_connect(stream, host, path).map_err(|(e, _, _)| e)
     }
+
+    /// Like [`connect`](Self::connect), but sends additional HTTP
+    /// headers during the opening handshake.
+    ///
+    /// On failure the `WebSocket` and `stream` are dropped.  Use
+    /// [`try_connect_with_headers`](Self::try_connect_with_headers) to
+    /// recover them for retry.
+    pub fn connect_with_headers<S: Read + Write>(
+        self,
+        stream: S,
+        host: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<WebSocket<S, R>, Error> {
+        self.try_connect_with_headers(stream, host, path, headers)
+            .map_err(|(e, _, _)| e)
+    }
 }
 
 impl<S, R: Rng> WebSocket<S, R> {
     /// Returns a reference to the underlying stream.
     pub fn inner(&self) -> &S {
         &self.stream
+    }
+
+    /// Returns a mutable reference to the underlying stream.
+    ///
+    /// Useful for changing timeouts, toggling non-blocking mode, or
+    /// other transport-level configuration while connected.
+    pub fn inner_mut(&mut self) -> &mut S {
+        &mut self.stream
     }
 
     /// Disconnect and return the stream and a streamless `WebSocket<()>`
@@ -831,6 +949,7 @@ impl<S, R: Rng> WebSocket<S, R> {
         ws.sess.fragment_opcode = 0;
         ws.sess.close_state = CloseState::Open;
         ws.sess.control_flood_score = 0;
+        ws.sess.negotiated_subprotocol = None;
         (ws, stream)
     }
 
@@ -884,6 +1003,28 @@ impl<S, R: Rng> WebSocket<S, R> {
     pub fn max_control_flood_score(mut self, max: usize) -> Self {
         self.sess.max_control_flood_score = max;
         self
+    }
+
+    /// Request subprotocol negotiation during the handshake.
+    ///
+    /// The protocols are sent in the `Sec-WebSocket-Protocol` header as
+    /// a comma-separated list, in preference order.  After a successful
+    /// [`connect`](WebSocket::connect), call
+    /// [`subprotocol`](WebSocket::subprotocol) to see which one the
+    /// server selected (if any).
+    pub fn subprotocols(mut self, protocols: &[&str]) -> Self {
+        self.sess.subprotocols = if protocols.is_empty() {
+            None
+        } else {
+            Some(protocols.join(", "))
+        };
+        self
+    }
+
+    /// Returns the subprotocol selected by the server, or `None` if no
+    /// subprotocol negotiation took place.
+    pub fn subprotocol(&self) -> Option<&str> {
+        self.sess.negotiated_subprotocol.as_deref()
     }
 
     /// Move all buffers into a new `WebSocket<T>`, replacing the stream.

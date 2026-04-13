@@ -440,6 +440,7 @@ struct ConnectMock {
     include_upgrade: bool,
     include_connection: bool,
     bare_lf: bool,
+    subprotocol: Option<String>,
 }
 
 impl ConnectMock {
@@ -452,6 +453,7 @@ impl ConnectMock {
             include_upgrade: true,
             include_connection: true,
             bare_lf: false,
+            subprotocol: None,
         }
     }
     fn auto_bare_lf() -> Self {
@@ -463,6 +465,7 @@ impl ConnectMock {
             include_upgrade: true,
             include_connection: true,
             bare_lf: true,
+            subprotocol: None,
         }
     }
     fn auto_with_extra(extra: Vec<u8>) -> Self {
@@ -474,6 +477,7 @@ impl ConnectMock {
             include_upgrade: true,
             include_connection: true,
             bare_lf: false,
+            subprotocol: None,
         }
     }
     fn auto_without_upgrade() -> Self {
@@ -485,6 +489,7 @@ impl ConnectMock {
             include_upgrade: false,
             include_connection: true,
             bare_lf: false,
+            subprotocol: None,
         }
     }
     fn auto_without_connection() -> Self {
@@ -496,6 +501,13 @@ impl ConnectMock {
             include_upgrade: true,
             include_connection: false,
             bare_lf: false,
+            subprotocol: None,
+        }
+    }
+    fn auto_with_subprotocol(proto: &str) -> Self {
+        ConnectMock {
+            subprotocol: Some(proto.to_owned()),
+            ..ConnectMock::auto()
         }
     }
     fn with_response(rx: Vec<u8>) -> Self {
@@ -507,6 +519,7 @@ impl ConnectMock {
             include_upgrade: true,
             include_connection: true,
             bare_lf: false,
+            subprotocol: None,
         }
     }
 }
@@ -525,6 +538,9 @@ impl Read for ConnectMock {
             }
             if self.include_connection {
                 response.push_str(&format!("Connection: Upgrade{nl}"));
+            }
+            if let Some(ref proto) = self.subprotocol {
+                response.push_str(&format!("Sec-WebSocket-Protocol: {proto}{nl}"));
             }
             response.push_str(&format!("Sec-WebSocket-Accept: {accept_str}{nl}{nl}"));
             self.rx = response.into_bytes();
@@ -1123,6 +1139,7 @@ fn connection_error_display() {
         ConnectionError::InvalidCloseCode(9999),
         ConnectionError::MaskedServerFrame,
         ConnectionError::ControlFlood,
+        ConnectionError::InvalidSubprotocol,
     ];
     for e in cases {
         assert!(!e.to_string().is_empty());
@@ -1821,6 +1838,115 @@ fn flush_stream_flush_timed_out() {
     }
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(TimedOutFlushMock);
     assert_eq!(ws.flush().unwrap(), SendResult::Queued);
+}
+
+// ---- Subprotocol negotiation ----
+
+#[test]
+fn connect_with_subprotocol() {
+    let ws = WebSocket::new(CounterRng(0))
+        .subprotocols(&["chat", "superchat"])
+        .connect(ConnectMock::auto_with_subprotocol("chat"), "example.com", "/ws")
+        .unwrap();
+    assert_eq!(ws.subprotocol(), Some("chat"));
+    // Verify the request included the Sec-WebSocket-Protocol header.
+    let req = &ws.inner().tx;
+    assert!(req
+        .windows(b"Sec-WebSocket-Protocol: chat, superchat".len())
+        .any(|w| w == b"Sec-WebSocket-Protocol: chat, superchat"));
+}
+
+#[test]
+fn connect_subprotocol_not_offered() {
+    let result = WebSocket::new(CounterRng(0))
+        .subprotocols(&["chat", "superchat"])
+        .connect(ConnectMock::auto_with_subprotocol("nope"), "example.com", "/ws");
+    assert!(matches!(
+        result,
+        Err(Error::Reconnect(ConnectionError::InvalidSubprotocol))
+    ));
+}
+
+#[test]
+fn connect_subprotocol_unrequested() {
+    // Client doesn't set subprotocols, but server sends one.
+    let result = WebSocket::new(CounterRng(0))
+        .connect(ConnectMock::auto_with_subprotocol("chat"), "example.com", "/ws");
+    assert!(matches!(
+        result,
+        Err(Error::Reconnect(ConnectionError::InvalidSubprotocol))
+    ));
+}
+
+// ---- Custom headers ----
+
+#[test]
+fn connect_with_headers_success() {
+    let ws = WebSocket::new(CounterRng(0))
+        .connect_with_headers(
+            ConnectMock::auto(),
+            "example.com",
+            "/ws",
+            &[("Authorization", "Bearer tok")],
+        )
+        .unwrap();
+    let req = &ws.inner().tx;
+    assert!(req
+        .windows(b"Authorization: Bearer tok".len())
+        .any(|w| w == b"Authorization: Bearer tok"));
+}
+
+#[test]
+fn try_connect_rejects_header_name_crlf() {
+    let result = WebSocket::new(CounterRng(0)).try_connect_with_headers(
+        ConnectMock::auto(),
+        "example.com",
+        "/ws",
+        &[("Bad\r\nName", "value")],
+    );
+    assert!(matches!(
+        result,
+        Err((Error::Fatal(CallerError::InvalidHeaderValue), _, _))
+    ));
+}
+
+#[test]
+fn try_connect_rejects_header_value_crlf() {
+    let result = WebSocket::new(CounterRng(0)).try_connect_with_headers(
+        ConnectMock::auto(),
+        "example.com",
+        "/ws",
+        &[("Name", "bad\r\nvalue")],
+    );
+    assert!(matches!(
+        result,
+        Err((Error::Fatal(CallerError::InvalidHeaderValue), _, _))
+    ));
+}
+
+// ---- inner_mut ----
+
+#[test]
+fn inner_mut_accessible() {
+    let mut ws = ws(frame(true, OP_TEXT, b"hi"));
+    let _stream: &mut MockStream = ws.inner_mut();
+}
+
+// ---- Rng default next_u32 ----
+
+#[test]
+fn rng_default_next_u32() {
+    struct FillOnly;
+    impl Rng for FillOnly {
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for (i, b) in dest.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_add(1);
+            }
+        }
+    }
+    // Default next_u32 calls fill_bytes with a 4-byte buffer,
+    // then interprets as little-endian.
+    assert_eq!(Rng::next_u32(&mut FillOnly), u32::from_le_bytes([1, 2, 3, 4]));
 }
 
 // ---- Send + Sync static assertions ----

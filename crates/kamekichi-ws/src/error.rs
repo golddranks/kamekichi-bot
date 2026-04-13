@@ -6,7 +6,7 @@ use crate::read_buf::FillError;
 /// Actionable error from a WebSocket operation.
 #[derive(Debug)]
 pub enum Error {
-    /// The connection is dead or protocol-violated.  Reconnect.
+    /// The connection is dead or protocol-violated.  Might get fixed by reconnecting.
     Reconnect(ConnectionError),
     /// Caller error.  Reconnecting will not help.
     Fatal(CallerError),
@@ -63,6 +63,9 @@ pub enum ConnectionError {
     MaskedServerFrame,
     /// Too many control frames without intervening data frames.
     ControlFlood,
+    /// Server selected a subprotocol that was not offered by the client,
+    /// or sent `Sec-WebSocket-Protocol` when the client did not request one.
+    InvalidSubprotocol,
 }
 
 /// Caller-side error.  Reconnecting will not help.
@@ -130,6 +133,9 @@ impl std::fmt::Display for ConnectionError {
             ConnectionError::InvalidCloseCode(code) => write!(f, "invalid close code: {code}"),
             ConnectionError::MaskedServerFrame => write!(f, "server sent a masked frame"),
             ConnectionError::ControlFlood => write!(f, "control frame flood detected"),
+            ConnectionError::InvalidSubprotocol => {
+                write!(f, "server selected an unrequested subprotocol")
+            }
         }
     }
 }
