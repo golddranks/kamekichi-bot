@@ -31,6 +31,8 @@
   exhaustion (recent — connection alive) from I/O silence (stale —
   consider a ping).
 - **Breaking:** Renamed `SendResult` → `SendStatus`.
+- `max_payload`, `max_buf_size`, and `frame_budget` now clamp
+  out-of-range values instead of panicking.
 
 ## [0.1.1]
 

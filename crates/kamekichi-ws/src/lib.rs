@@ -1088,42 +1088,30 @@ impl<S, R: Rng> WebSocket<S, R> {
 
     /// Set the maximum payload size accepted for a single frame or
     /// reassembled fragmented message.  Default: [`DEFAULT_MAX_PAYLOAD`].
+    /// Clamped to 125..=[`isize::MAX`].
     pub fn max_payload(mut self, max: usize) -> Self {
-        assert!(
-            max >= 125,
-            "max_payload must be at least 125 (control frame limit)"
-        );
-        assert!(
-            max <= isize::MAX as usize,
-            "max_payload exceeds allocation limit"
-        );
-        self.sess.max_payload = max;
+        self.sess.max_payload = max.clamp(125, isize::MAX as usize);
         self
     }
 
     /// Set the target buffer capacity.  After processing a large message
     /// the read buffer is shrunk back to this size.  Default:
-    /// [`DEFAULT_MAX_BUF_SIZE`].  Must be at least 125.
+    /// [`DEFAULT_MAX_BUF_SIZE`].  Clamped to a minimum of 125.
     pub fn max_buf_size(mut self, max: usize) -> Self {
-        assert!(
-            max >= 125,
-            "max_buf_size must be at least 125 (control frame payload limit)"
-        );
-        self.sess.max_buf_size = max;
+        self.sess.max_buf_size = max.max(125);
         self
     }
 
     /// Set the maximum number of frames that
     /// [`read_message`](WebSocket::read_message) will process without
     /// producing a message before returning [`ReadStatus::Idle`].
-    /// Default: `usize::MAX` (unlimited).  Must be at least 1.
+    /// Default: `usize::MAX` (unlimited).  Clamped to a minimum of 1.
     ///
     /// This gives the caller periodic control even when the server
     /// sends many control frames or continuation fragments without
     /// completing a message.
     pub fn frame_budget(mut self, budget: usize) -> Self {
-        assert!(budget >= 1, "frame_budget must be at least 1");
-        self.sess.frame_budget = budget;
+        self.sess.frame_budget = budget.max(1);
         self
     }
 

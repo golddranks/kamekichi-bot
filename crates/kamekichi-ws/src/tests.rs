@@ -1282,21 +1282,27 @@ fn data_frame_exceeds_max_payload() {
 // ---- builder asserts ----
 
 #[test]
-#[should_panic(expected = "max_payload must be at least 125")]
-fn max_payload_too_small() {
-    WebSocket::new(CounterRng(0)).max_payload(124);
+fn max_payload_clamped_low() {
+    let ws = WebSocket::new(CounterRng(0)).max_payload(1);
+    assert_eq!(ws.sess.max_payload, 125);
 }
 
 #[test]
-#[should_panic(expected = "max_payload exceeds allocation limit")]
-fn max_payload_too_large() {
-    WebSocket::new(CounterRng(0)).max_payload(isize::MAX as usize + 1);
+fn max_payload_clamped_high() {
+    let ws = WebSocket::new(CounterRng(0)).max_payload(usize::MAX);
+    assert_eq!(ws.sess.max_payload, isize::MAX as usize);
 }
 
 #[test]
-#[should_panic(expected = "max_buf_size must be at least 125")]
-fn max_buf_size_too_small() {
-    WebSocket::new(CounterRng(0)).max_buf_size(124);
+fn max_buf_size_clamped() {
+    let ws = WebSocket::new(CounterRng(0)).max_buf_size(1);
+    assert_eq!(ws.sess.max_buf_size, 125);
+}
+
+#[test]
+fn frame_budget_clamped() {
+    let ws = WebSocket::new(CounterRng(0)).frame_budget(0);
+    assert_eq!(ws.sess.frame_budget, 1);
 }
 
 // ---- Additional mocks for send/flush paths ----
