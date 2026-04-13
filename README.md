@@ -1,8 +1,12 @@
-# discord-bot
+# Kamekichi - a Discord bot framework
 
-kamekichi-ws: [![Full Coverage](https://github.com/golddranks/kamekichi-bot/actions/workflows/coverage.yml/badge.svg)](https://github.com/golddranks/kamekichi-bot/actions/workflows/coverage.yml)
+Kamekichi is full-featured framework for writing well performing and robust
+Discord bots with simple, clean API.
 
-A minimal Discord bot written in Rust with no async runtime and no Discord SDK.
+## Supporting crates
+
+- [kamekichi-ws: A lightweight, robust, low-level WebSocket (RFC 6455) client library for Rust](https://github.com/golddranks/kamekichi-bot/tree/main/crates/kamekichi-ws)
+- [kamekichi-discord: A simple low-level Discord client with minimal dependencies](https://github.com/golddranks/kamekichi-bot/tree/main/crates/kamekichi-discord)
 
 ## Features
 
@@ -10,11 +14,6 @@ A minimal Discord bot written in Rust with no async runtime and no Discord SDK.
 - **Reaction roles** — assign/remove roles when users react to messages
 - **Channel logging** — append all messages, edits, deletes, and reactions to a log file
 - **Config hot-reload** — edit config.json while the bot is running; changes apply within 5 seconds
-
-## Requirements
-
-- Rust + Cargo
-- A Discord account
 
 ## Setup
 
@@ -28,6 +27,7 @@ A minimal Discord bot written in Rust with no async runtime and no Discord SDK.
 ### 2. Enable privileged intents
 
 In the Developer Portal under **Bot → Privileged Gateway Intents**, enable:
+
 - **Message Content Intent** (required for logging message content)
 
 ### 3. Invite the bot to your server
@@ -80,12 +80,12 @@ cargo run
 
 ## Config reference
 
-| Field | Description |
-|---|---|
-| `token` | Bot token from the Developer Portal |
-| `log_file` | Path to append event logs (omit to disable logging) |
+| Field              | Description                                          |
+| ------------------ | ---------------------------------------------------- |
+| `token`            | Bot token from the Developer Portal                  |
+| `log_file`         | Path to append event logs (omit to disable logging)  |
 | `managed_messages` | Messages the bot posts and keeps in sync with config |
-| `reaction_roles` | Emoji → role mappings on specific messages |
+| `reaction_roles`   | Emoji → role mappings on specific messages           |
 
 ### Managed messages
 
