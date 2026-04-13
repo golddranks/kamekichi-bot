@@ -269,15 +269,15 @@ impl Session {
         // Receive HELLO and extract heartbeat interval
         let heartbeat_interval_ms = {
             let text = match ws.read_message()? {
-                Some(ws::Message::Text(p)) => p,
-                Some(ws::Message::Close(code, reason)) => {
+                ws::ReadStatus::Message(ws::Message::Text(p)) => p,
+                ws::ReadStatus::Message(ws::Message::Close(code, reason)) => {
                     return Err(Error::GatewayClosed {
                         code,
                         reason: reason.to_owned(),
                     });
                 }
-                Some(_) => return Err(Error::HelloNotText),
-                None => return Err(Error::HandshakeTimeout),
+                ws::ReadStatus::Message(_) => return Err(Error::HelloNotText),
+                ws::ReadStatus::Idle => return Err(Error::HandshakeTimeout),
             };
             let hello: GatewayPayload = serde_json::from_str(text)?;
             if hello.op != OP_HELLO {
@@ -358,7 +358,7 @@ impl Session {
                         .get_ref()
                         .set_read_timeout(Some(heartbeat.poll_timeout().min(remaining)))?;
                     match ws.read_message() {
-                        Ok(Some(ws::Message::Text(text))) => match process_text(text)? {
+                        Ok(ws::ReadStatus::Message(ws::Message::Text(text))) => match process_text(text)? {
                             GatewayAction::HeartbeatAck => heartbeat.receive_ack(),
                             GatewayAction::SendHeartbeat => {
                                 heartbeat.server_requested(&mut ws, None, &mut write_buf)?;
@@ -380,14 +380,14 @@ impl Session {
                                 };
                             }
                         },
-                        Ok(Some(ws::Message::Close(code, reason))) => {
+                        Ok(ws::ReadStatus::Message(ws::Message::Close(code, reason))) => {
                             return Err(Error::GatewayClosed {
                                 code,
                                 reason: reason.to_owned(),
                             });
                         }
-                        Ok(Some(ws::Message::Binary(_))) => return Err(Error::UnexpectedBinary),
-                        Ok(None) => {
+                        Ok(ws::ReadStatus::Message(ws::Message::Binary(_))) => return Err(Error::UnexpectedBinary),
+                        Ok(ws::ReadStatus::Idle) => {
                             heartbeat.send_if_due(&mut ws, None, &mut write_buf)?;
                         }
                         Err(ws::Error::Reconnect(ws::ConnectionError::Closed)) => {
@@ -426,7 +426,7 @@ impl Session {
                 .set_read_timeout(Some(self.heartbeat.poll_timeout()));
 
             match self.ws.read_message() {
-                Ok(Some(ws::Message::Text(text))) => {
+                Ok(ws::ReadStatus::Message(ws::Message::Text(text))) => {
                     match process_text(text)? {
                         GatewayAction::HeartbeatAck => self.heartbeat.receive_ack(),
                         GatewayAction::SendHeartbeat => {
@@ -451,14 +451,14 @@ impl Session {
                         }
                     }
                 }
-                Ok(Some(ws::Message::Close(code, reason))) => {
+                Ok(ws::ReadStatus::Message(ws::Message::Close(code, reason))) => {
                     return Err(Error::GatewayClosed {
                         code,
                         reason: reason.to_owned(),
                     });
                 }
-                Ok(Some(ws::Message::Binary(_))) => return Err(Error::UnexpectedBinary),
-                Ok(None) => return Ok(None),
+                Ok(ws::ReadStatus::Message(ws::Message::Binary(_))) => return Err(Error::UnexpectedBinary),
+                Ok(ws::ReadStatus::Idle) => return Ok(None),
                 Err(ws::Error::Reconnect(ws::ConnectionError::Closed)) => {
                     return Err(Error::ConnectionClosed);
                 }

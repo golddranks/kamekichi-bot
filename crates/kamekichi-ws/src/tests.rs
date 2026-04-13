@@ -103,7 +103,7 @@ fn ws(data: Vec<u8>) -> WebSocket<MockStream, CounterRng> {
 #[test]
 fn text_7bit_length() {
     let mut ws = ws(frame(true, OP_TEXT, b"hello"));
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(p) => assert_eq!(p, "hello"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -113,7 +113,7 @@ fn text_7bit_length() {
 fn text_16bit_length() {
     let payload = vec![b'x'; 200];
     let mut ws = ws(frame(true, OP_TEXT, &payload));
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(p) => {
             assert_eq!(p.len(), 200);
             assert!(p.bytes().all(|b| b == b'x'));
@@ -126,7 +126,7 @@ fn text_16bit_length() {
 fn binary_64bit_length() {
     let payload = vec![0xAB; 65536];
     let mut ws = ws(frame(true, OP_BINARY, &payload));
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Binary(b) => {
             assert_eq!(b.len(), 65536);
             assert!(b.iter().all(|&x| x == 0xAB));
@@ -164,7 +164,7 @@ fn masked_server_frame_rejected() {
 fn binary_frame() {
     let payload = vec![0, 1, 2, 0xFF];
     let mut ws = ws(frame(true, OP_BINARY, &payload));
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Binary(b) => assert_eq!(b, &payload),
         other => panic!("expected Binary, got {other:?}"),
     }
@@ -177,7 +177,7 @@ fn ping_replies_pong_then_returns_next() {
     let mut data = frame(true, OP_PING, b"ping-data");
     data.extend(frame(true, OP_TEXT, b"after"));
     let mut ws = ws(data);
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(p) => assert_eq!(p, "after"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -189,7 +189,7 @@ fn pong_ignored() {
     let mut data = frame(true, OP_PONG, b"");
     data.extend(frame(true, OP_TEXT, b"after"));
     let mut ws = ws(data);
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(p) => assert_eq!(p, "after"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -198,7 +198,7 @@ fn pong_ignored() {
 #[test]
 fn close_empty_payload() {
     let mut ws = ws(frame(true, OP_CLOSE, b""));
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Close(code, reason) => {
             assert_eq!(code, None);
             assert!(reason.is_empty());
@@ -212,7 +212,7 @@ fn close_with_code_and_reason() {
     let mut payload = 1000u16.to_be_bytes().to_vec();
     payload.extend_from_slice(b"normal");
     let mut ws = ws(frame(true, OP_CLOSE, &payload));
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Close(code, reason) => {
             assert_eq!(code, Some(1000));
             assert_eq!(reason, "normal");
@@ -258,7 +258,7 @@ fn fragmented_text() {
     data.extend(frame(false, OP_CONTINUATION, b"lo "));
     data.extend(frame(true, OP_CONTINUATION, b"world"));
     let mut ws = ws(data);
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(p) => assert_eq!(p, "hello world"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -269,7 +269,7 @@ fn fragmented_binary() {
     let mut data = frame(false, OP_BINARY, &[1, 2]);
     data.extend(frame(true, OP_CONTINUATION, &[3, 4]));
     let mut ws = ws(data);
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Binary(b) => assert_eq!(b, [1, 2, 3, 4]),
         other => panic!("expected Binary, got {other:?}"),
     }
@@ -281,7 +281,7 @@ fn control_interleaved_in_fragments() {
     data.extend(frame(true, OP_PING, b""));
     data.extend(frame(true, OP_CONTINUATION, b"lo"));
     let mut ws = ws(data);
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(p) => assert_eq!(p, "hello"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -361,12 +361,12 @@ fn many_frames_survive_compaction() {
 
     let mut ws = ws(data);
     for _ in 0..20 {
-        match ws.read_message().unwrap().unwrap() {
+        match ws.read_message().unwrap().message().unwrap() {
             Message::Text(p) => assert_eq!(p.len(), 1000),
             other => panic!("expected Text, got {other:?}"),
         }
     }
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(p) => assert_eq!(p, "final"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -380,7 +380,7 @@ fn sequential_messages_all_correct() {
     }
     let mut ws = ws(data);
     for i in 0..100u32 {
-        match ws.read_message().unwrap().unwrap() {
+        match ws.read_message().unwrap().message().unwrap() {
             Message::Text(p) => assert_eq!(p, format!("msg-{i}")),
             other => panic!("expected Text, got {other:?}"),
         }
@@ -635,7 +635,7 @@ fn connect_preserves_leftover() {
     let mut ws = WebSocket::new(CounterRng(0))
         .connect(ConnectMock::auto_with_extra(extra), "example.com", "/ws")
         .unwrap();
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(p) => assert_eq!(p, "leftover"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -742,7 +742,7 @@ fn close_echo_verified() {
     let mut body = 1000u16.to_be_bytes().to_vec();
     body.extend_from_slice(b"goodbye");
     let mut ws = ws(frame(true, OP_CLOSE, &body));
-    let _ = ws.read_message().unwrap().unwrap();
+    let _ = ws.read_message().unwrap().message().unwrap();
     let (opcode, payload) = parse_client_frame(&ws.inner().tx);
     assert_eq!(opcode, OP_CLOSE);
     assert_eq!(payload, 1000u16.to_be_bytes());
@@ -753,7 +753,7 @@ fn ping_reply_verified() {
     let mut data = frame(true, OP_PING, b"ping-data");
     data.extend(frame(true, OP_TEXT, b"x"));
     let mut ws = ws(data);
-    let _ = ws.read_message().unwrap().unwrap();
+    let _ = ws.read_message().unwrap().message().unwrap();
     let (opcode, payload) = parse_client_frame(&ws.inner().tx);
     assert_eq!(opcode, OP_PONG);
     assert_eq!(payload, b"ping-data");
@@ -824,7 +824,7 @@ fn send_close_allows_private_use() {
 fn partial_read_one_byte_at_a_time() {
     let data = frame(true, OP_TEXT, b"hello world");
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(ChunkedMock::new(data, 1));
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(p) => assert_eq!(p, "hello world"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -835,7 +835,7 @@ fn partial_read_16bit_frame() {
     let payload = vec![b'y'; 300];
     let data = frame(true, OP_TEXT, &payload);
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(ChunkedMock::new(data, 3));
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(p) => {
             assert_eq!(p.len(), 300);
             assert!(p.bytes().all(|b| b == b'y'));
@@ -865,8 +865,8 @@ fn would_block_then_read_succeeds() {
     let data = frame(true, OP_TEXT, b"hello");
     let mut ws =
         WebSocket::new(CounterRng(0)).with_stream(ChunkedMock::with_blocks(data, usize::MAX, 1));
-    assert!(matches!(ws.read_message(), Ok(None)));
-    match ws.read_message().unwrap().unwrap() {
+    assert!(matches!(ws.read_message(), Ok(ReadStatus::Idle)));
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(p) => assert_eq!(p, "hello"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -938,7 +938,7 @@ fn pong_suppressed_when_send_buffer_full() {
         .max_buf_size(125)
         .with_stream(WriteBlockingMock::new(data));
 
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t, "done"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -1057,10 +1057,10 @@ fn frame_budget_returns_none() {
         .with_stream(MockStream::new(data));
 
     // First call: processes 3 pings, budget exhausted
-    assert!(matches!(ws.read_message(), Ok(None)));
+    assert!(matches!(ws.read_message(), Ok(ReadStatus::Idle)));
 
     // Second call: processes remaining 2 pings, then returns text
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t, "after"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -1140,6 +1140,7 @@ fn connection_error_display() {
         ConnectionError::MaskedServerFrame,
         ConnectionError::Flood,
         ConnectionError::InvalidSubprotocol,
+        ConnectionError::PingTimeout,
     ];
     for e in cases {
         assert!(!e.to_string().is_empty());
@@ -1485,9 +1486,9 @@ impl Write for InterruptOnceWriter {
 fn send_queued_then_retry_later() {
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(WriteBlockingMock::new(Vec::new()));
     // First send: builds frame, flush blocks → Queued
-    assert_eq!(ws.send_text("a").unwrap(), SendResult::Queued);
+    assert_eq!(ws.send_text("a").unwrap(), SendStatus::Queued);
     // Second send: has_pending, flush blocks → RetryLater
-    assert_eq!(ws.send_text("b").unwrap(), SendResult::RetryLater);
+    assert_eq!(ws.send_text("b").unwrap(), SendStatus::RetryLater);
 }
 
 #[test]
@@ -1498,7 +1499,7 @@ fn send_pending_flush_hard_error() {
     };
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(stream);
     // First send: flush blocks → Queued
-    assert_eq!(ws.send_text("a").unwrap(), SendResult::Queued);
+    assert_eq!(ws.send_text("a").unwrap(), SendStatus::Queued);
     // Second send: has_pending, flush → ConnectionReset
     assert!(matches!(
         ws.send_text("b"),
@@ -1532,7 +1533,7 @@ fn send_interrupted_retries() {
         interrupt: true,
     };
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(stream);
-    assert_eq!(ws.send_text("hello").unwrap(), SendResult::Done);
+    assert_eq!(ws.send_text("hello").unwrap(), SendStatus::Done);
 }
 
 // ---- WebSocket::flush paths ----
@@ -1540,7 +1541,7 @@ fn send_interrupted_retries() {
 #[test]
 fn flush_no_pending() {
     let mut ws = ws(Vec::new());
-    assert_eq!(ws.flush().unwrap(), SendResult::Done);
+    assert_eq!(ws.flush().unwrap(), SendStatus::Done);
 }
 
 #[test]
@@ -1551,15 +1552,15 @@ fn flush_clears_pending() {
         remaining_blocks: 1,
     };
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(stream);
-    assert_eq!(ws.send_text("hello").unwrap(), SendResult::Queued);
-    assert_eq!(ws.flush().unwrap(), SendResult::Done);
+    assert_eq!(ws.send_text("hello").unwrap(), SendStatus::Queued);
+    assert_eq!(ws.flush().unwrap(), SendStatus::Done);
 }
 
 #[test]
 fn flush_pending_blocked() {
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(WriteBlockingMock::new(Vec::new()));
-    assert_eq!(ws.send_text("hello").unwrap(), SendResult::Queued);
-    assert_eq!(ws.flush().unwrap(), SendResult::Queued);
+    assert_eq!(ws.send_text("hello").unwrap(), SendStatus::Queued);
+    assert_eq!(ws.flush().unwrap(), SendStatus::Queued);
 }
 
 #[test]
@@ -1569,7 +1570,7 @@ fn flush_pending_hard_error() {
         blocks: 1,
     };
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(stream);
-    assert_eq!(ws.send_text("a").unwrap(), SendResult::Queued);
+    assert_eq!(ws.send_text("a").unwrap(), SendStatus::Queued);
     assert!(matches!(
         ws.flush(),
         Err(Error::Reconnect(ConnectionError::Io(_)))
@@ -1584,7 +1585,7 @@ fn flush_stream_flush_would_block() {
     };
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(stream);
     // No pending send data, goes straight to stream.flush() → WouldBlock
-    assert_eq!(ws.flush().unwrap(), SendResult::Queued);
+    assert_eq!(ws.flush().unwrap(), SendStatus::Queued);
 }
 
 #[test]
@@ -1614,12 +1615,12 @@ fn pending_send_flushed_on_next_read() {
     };
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(stream);
     // First read: ping → pong queued (write blocked), returns text "a"
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t, "a"),
         other => panic!("expected Text, got {other:?}"),
     }
     // Second read: pending pong flushed (write succeeds), returns text "b"
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t, "b"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -1631,11 +1632,11 @@ fn pending_send_would_block_during_read() {
     data.extend(frame(true, OP_TEXT, b"a"));
     data.extend(frame(true, OP_TEXT, b"b"));
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(WriteBlockingMock::new(data));
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t, "a"),
         other => panic!("expected Text, got {other:?}"),
     }
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t, "b"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -1664,11 +1665,11 @@ fn fragment_buf_shrinks_after_large_message() {
     let mut ws = WebSocket::new(ZeroRng)
         .max_buf_size(125)
         .with_stream(MockStream::new(data));
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t.len(), 400),
         other => panic!("expected Text, got {other:?}"),
     }
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t, "done"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -1792,7 +1793,7 @@ fn pending_send_hard_error_during_read() {
     };
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(stream);
     // First read: ping → pong queued (write blocked), returns text "a"
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t, "a"),
         other => panic!("expected Text, got {other:?}"),
     }
@@ -1813,9 +1814,9 @@ fn send_pending_flush_succeeds_then_sends() {
         remaining_blocks: 1,
     };
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(stream);
-    assert_eq!(ws.send_text("a").unwrap(), SendResult::Queued);
+    assert_eq!(ws.send_text("a").unwrap(), SendStatus::Queued);
     // Pending data from "a" is flushed (write now succeeds), then "b" is built + sent
-    assert_eq!(ws.send_text("b").unwrap(), SendResult::Done);
+    assert_eq!(ws.send_text("b").unwrap(), SendStatus::Done);
 }
 
 // ---- flush: stream.flush TimedOut variant ----
@@ -1837,7 +1838,7 @@ fn flush_stream_flush_timed_out() {
         }
     }
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(TimedOutFlushMock);
-    assert_eq!(ws.flush().unwrap(), SendResult::Queued);
+    assert_eq!(ws.flush().unwrap(), SendStatus::Queued);
 }
 
 // ---- Subprotocol negotiation ----
@@ -1948,14 +1949,125 @@ fn frame_budget_on_continuation_frames() {
         .with_stream(MockStream::new(data));
 
     // First call: frames 1,2,3 → budget exhausted
-    assert!(matches!(ws.read_message(), Ok(None)));
+    assert!(matches!(ws.read_message(), Ok(ReadStatus::Idle)));
     // Second call: frames 4,5,6 → budget exhausted
-    assert!(matches!(ws.read_message(), Ok(None)));
+    assert!(matches!(ws.read_message(), Ok(ReadStatus::Idle)));
     // Third call: frame 7 (FIN) → completed message
-    match ws.read_message().unwrap().unwrap() {
+    match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t, "1234567"),
         other => panic!("expected Text, got {other:?}"),
     }
+}
+
+// ---- send_ping / ping timeout ----
+
+#[test]
+fn send_ping_builds_ping_frame() {
+    let mut ws = WebSocket::new(CounterRng(0)).with_stream(MockStream::new(Vec::new()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    assert_eq!(ws.send_ping(deadline).unwrap(), SendStatus::Done);
+    let (opcode, payload) = parse_client_frame(&ws.inner().tx);
+    assert_eq!(opcode, OP_PING);
+    assert!(payload.is_empty());
+}
+
+#[test]
+fn ping_deadline_cleared_on_activity() {
+    let mut data = Vec::new();
+    data.extend(frame(true, OP_TEXT, b"hi"));
+    let mut ws = WebSocket::new(CounterRng(0)).with_stream(MockStream::new(data));
+    // Set a deadline in the past — would trigger PingTimeout if not cleared.
+    ws.send_ping(std::time::Instant::now() - std::time::Duration::from_secs(1))
+        .unwrap();
+    // Reading a message clears the deadline.
+    match ws.read_message().unwrap().message().unwrap() {
+        Message::Text(t) => assert_eq!(t, "hi"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+/// Reads return WouldBlock; writes succeed.
+struct ReadBlocksMock {
+    tx: Vec<u8>,
+}
+
+impl Read for ReadBlocksMock {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::new(io::ErrorKind::WouldBlock, "blocked"))
+    }
+}
+
+impl Write for ReadBlocksMock {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.tx.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn ping_timeout_on_silence() {
+    let mut ws = WebSocket::new(CounterRng(0))
+        .with_stream(ReadBlocksMock { tx: Vec::new() });
+    ws.send_ping(std::time::Instant::now() - std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(
+        ws.read_message(),
+        Err(Error::Reconnect(ConnectionError::PingTimeout))
+    ));
+}
+
+#[test]
+fn ping_deadline_not_set_on_retry_later() {
+    let mut ws = WebSocket::new(CounterRng(0)).with_stream(WriteBlockingMock::new(Vec::new()));
+    // First send blocks → Queued. send_ping can't flush pending → RetryLater.
+    assert_eq!(ws.send_text("a").unwrap(), SendStatus::Queued);
+    let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    assert_eq!(ws.send_ping(deadline).unwrap(), SendStatus::RetryLater);
+    // Deadline not set, so read returns Closed (EOF), not PingTimeout.
+    assert!(matches!(
+        ws.read_message(),
+        Err(Error::Reconnect(ConnectionError::Closed))
+    ));
+}
+
+// ---- ReadStatus / last_activity ----
+
+#[test]
+fn read_status_message_on_idle_is_none() {
+    let status = ReadStatus::Idle;
+    assert!(status.message().is_none());
+}
+
+#[test]
+fn last_activity_updated_on_message() {
+    let mut ws = ws(frame(true, OP_TEXT, b"hi"));
+    assert!(ws.last_activity().is_none());
+    ws.read_message().unwrap();
+    assert!(ws.last_activity().is_some());
+}
+
+#[test]
+fn last_activity_updated_on_budget_exhaustion() {
+    let mut data = Vec::new();
+    data.extend(frame(true, OP_PING, b""));
+    let mut ws = WebSocket::new(CounterRng(0))
+        .frame_budget(1)
+        .with_stream(MockStream::new(data));
+    assert!(ws.last_activity().is_none());
+    assert!(matches!(ws.read_message(), Ok(ReadStatus::Idle)));
+    assert!(ws.last_activity().is_some());
+}
+
+#[test]
+fn last_activity_not_updated_on_would_block() {
+    let mut ws = WebSocket::new(CounterRng(0))
+        .with_stream(ReadBlocksMock { tx: Vec::new() });
+    assert!(ws.last_activity().is_none());
+    assert!(matches!(ws.read_message(), Ok(ReadStatus::Idle)));
+    assert!(ws.last_activity().is_none());
 }
 
 // ---- Rng default next_u32 ----

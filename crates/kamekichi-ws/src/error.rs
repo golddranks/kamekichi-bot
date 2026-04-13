@@ -66,6 +66,8 @@ pub enum ConnectionError {
     /// Server selected a subprotocol that was not offered by the client,
     /// or sent `Sec-WebSocket-Protocol` when the client did not request one.
     InvalidSubprotocol,
+    /// No frame was received before the [`send_ping`](crate::WebSocket::send_ping) deadline.
+    PingTimeout,
 }
 
 /// Caller-side error.  Reconnecting will not help.
@@ -136,6 +138,7 @@ impl std::fmt::Display for ConnectionError {
             ConnectionError::InvalidSubprotocol => {
                 write!(f, "server selected an unrequested subprotocol")
             }
+            ConnectionError::PingTimeout => write!(f, "ping timeout: no response by deadline"),
         }
     }
 }

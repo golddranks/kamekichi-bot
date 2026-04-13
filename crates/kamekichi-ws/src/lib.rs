@@ -14,8 +14,11 @@
 //!    [`try_connect`](WebSocket::try_connect)) performs the HTTP upgrade
 //!    handshake.  Pass extra headers with
 //!    [`connect_with_headers`](WebSocket::connect_with_headers).
-//! 3. **Message loop** — [`read_message`](WebSocket::read_message) and
-//!    [`send_text`](WebSocket::send_text) /
+//! 3. **Message loop** — [`read_message`](WebSocket::read_message)
+//!    returns [`ReadStatus`]: either a [`Message`] or
+//!    [`Idle`](ReadStatus::Idle).  Check
+//!    [`last_activity`](WebSocket::last_activity) for liveness.
+//!    Send with [`send_text`](WebSocket::send_text) /
 //!    [`send_binary`](WebSocket::send_binary).
 //! 4. **Close** — [`send_close`](WebSocket::send_close), then keep
 //!    calling [`read_message`](WebSocket::read_message) until
@@ -33,6 +36,7 @@ mod send_buf;
 mod tests;
 
 use std::io::{self, Read, Write};
+use std::time::Instant;
 
 use read_buf::ReadBuf;
 use send_buf::SendBuf;
@@ -81,7 +85,7 @@ const OP_PONG: u8 = 0xA;
 
 /// Outcome of a send operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SendResult {
+pub enum SendStatus {
     /// Frame fully written to the stream.
     Done,
     /// Frame is queued in the send buffer but not yet (fully) flushed.
@@ -103,6 +107,32 @@ pub enum Message<'a> {
     Binary(&'a [u8]),
     /// A close frame with optional status code and reason.
     Close(Option<u16>, &'a str),
+}
+
+/// Result of [`WebSocket::read_message`].
+#[derive(Debug)]
+pub enum ReadStatus<'a> {
+    /// A complete message was read.
+    Message(Message<'a>),
+    /// No complete message is available.
+    ///
+    /// This covers non-blocking `WouldBlock`, read timeouts, and
+    /// frame budget exhaustion.  Use
+    /// [`last_activity`](WebSocket::last_activity) to tell whether
+    /// the connection is alive: if recent, frames are flowing but no
+    /// complete message was produced yet; if stale or `None`, the
+    /// wire has been silent and a liveness probe (ping) may be warranted.
+    Idle,
+}
+
+impl<'a> ReadStatus<'a> {
+    /// Returns the contained message, or `None` if idle.
+    pub fn message(self) -> Option<Message<'a>> {
+        match self {
+            ReadStatus::Message(m) => Some(m),
+            ReadStatus::Idle => None,
+        }
+    }
 }
 
 /// Close handshake state (RFC 6455 §7.1).
@@ -147,7 +177,7 @@ struct Session {
     /// buffer is shrunk back to this size to avoid permanent memory bloat.
     max_buf_size: usize,
     /// Max frames processed per [`read_message`] call without producing
-    /// a message before returning `Ok(None)`.  `usize::MAX` = unlimited.
+    /// a message before returning [`ReadStatus::Idle`].  `usize::MAX` = unlimited.
     frame_budget: usize,
     /// Running score for flood detection.  Incremented per frame,
     /// decremented per small read and per completed message.
@@ -159,6 +189,15 @@ struct Session {
     subprotocols: Option<String>,
     /// The subprotocol selected by the server during the handshake.
     negotiated_subprotocol: Option<String>,
+    /// Deadline by which a pong (or any frame) must arrive after a
+    /// [`send_ping`](WebSocket::send_ping).  Cleared when any frame
+    /// is received; triggers [`ConnectionError::PingTimeout`] if
+    /// exceeded during an idle [`read_message`] call.
+    ping_deadline: Option<Instant>,
+    /// When the last frame was received.  Updated on every
+    /// [`read_message`](WebSocket::read_message) call that processed
+    /// at least one frame.
+    last_activity: Option<Instant>,
 }
 
 /// A WebSocket client over an arbitrary byte stream.
@@ -389,6 +428,8 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         self.sess.close_state = CloseState::Open;
         self.sess.flood_score = 0;
         self.sess.negotiated_subprotocol = None;
+        self.sess.ping_deadline = None;
+        self.sess.last_activity = None;
 
         let key = {
             let mut raw = [0u8; 16];
@@ -548,10 +589,12 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
     /// answered with pongs automatically, and close frames echo the status
     /// code back before returning [`Message::Close`].
     ///
-    /// Returns `Ok(None)` if the underlying stream is non-blocking and no
-    /// complete frame is available yet, in case of a timeout, or when the
-    /// [`frame_budget`](WebSocket::frame_budget) is exhausted.
-    pub fn read_message(&mut self) -> Result<Option<Message<'_>>, Error> {
+    /// Returns [`ReadStatus::Idle`] when no complete message is available.
+    /// Check [`last_activity`](Self::last_activity) to distinguish
+    /// budget exhaustion (recent activity — connection is alive) from
+    /// I/O silence (stale or `None` — consider a
+    /// [`send_ping`](Self::send_ping)).
+    pub fn read_message(&mut self) -> Result<ReadStatus<'_>, Error> {
         if self.sess.close_state == CloseState::Closed {
             return Err(CallerError::Closing.into());
         }
@@ -559,8 +602,29 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
             .bufs
             .read_message(&mut self.stream, &mut self.sess, &mut self.rng)
         {
-            Ok(msg) => Ok(msg),
-            Err(e) if e.is_would_block() => Ok(None),
+            Ok(Some(msg)) => {
+                let now = Instant::now();
+                self.sess.last_activity = Some(now);
+                self.sess.ping_deadline = None;
+                Ok(ReadStatus::Message(msg))
+            }
+            Ok(None) => {
+                // Budget exhausted — frames were processed.
+                let now = Instant::now();
+                self.sess.last_activity = Some(now);
+                self.sess.ping_deadline = None;
+                Ok(ReadStatus::Idle)
+            }
+            Err(e) if e.is_would_block() => {
+                if let Some(deadline) = self.sess.ping_deadline
+                    && Instant::now() >= deadline
+                {
+                    self.sess.ping_deadline = None;
+                    self.sess.close_state = CloseState::Closed;
+                    return Err(ConnectionError::PingTimeout.into());
+                }
+                Ok(ReadStatus::Idle)
+            }
             Err(e) => {
                 self.sess.close_state = CloseState::Closed;
                 Err(e)
@@ -575,14 +639,14 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
     /// (the new frame was **not** built — flush and retry).  Returns
     /// `Ok(Queued)` if the new frame was built but only partially flushed
     /// — call [`flush`](Self::flush) to finish.
-    fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<SendResult, Error> {
+    fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<SendStatus, Error> {
         if self.sess.close_state != CloseState::Open {
             return Err(CallerError::Closing.into());
         }
         if self.bufs.send.has_pending() {
             match self.bufs.send.flush(&mut self.stream) {
                 Ok(()) => {}
-                Err(e) if e.is_would_block() => return Ok(SendResult::RetryLater),
+                Err(e) if e.is_would_block() => return Ok(SendStatus::RetryLater),
                 Err(e) => return Err(e.into()),
             }
         }
@@ -591,18 +655,18 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         match self.bufs.send.flush(&mut self.stream) {
             Ok(()) => {
                 let _ = self.stream.flush();
-                Ok(SendResult::Done)
+                Ok(SendStatus::Done)
             }
-            Err(e) if e.is_would_block() => Ok(SendResult::Queued),
+            Err(e) if e.is_would_block() => Ok(SendStatus::Queued),
             Err(e) => Err(e.into()),
         }
     }
 
     /// Flush any queued send data to the stream.
     ///
-    /// Call this after a send method returns [`SendResult::Queued`] or
-    /// [`SendResult::RetryLater`] to finish writing.
-    pub fn flush(&mut self) -> Result<SendResult, Error> {
+    /// Call this after a send method returns [`SendStatus::Queued`] or
+    /// [`SendStatus::RetryLater`] to finish writing.
+    pub fn flush(&mut self) -> Result<SendStatus, Error> {
         if self.bufs.send.has_pending() {
             match self.bufs.send.flush(&mut self.stream) {
                 Ok(()) => {
@@ -610,28 +674,28 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                         .send
                         .maybe_shrink(self.sess.max_buf_size, &mut self.rng);
                 }
-                Err(e) if e.is_would_block() => return Ok(SendResult::Queued),
+                Err(e) if e.is_would_block() => return Ok(SendStatus::Queued),
                 Err(e) => return Err(e.into()),
             }
         }
         match self.stream.flush() {
-            Ok(()) => Ok(SendResult::Done),
+            Ok(()) => Ok(SendStatus::Done),
             Err(e)
                 if matches!(
                     e.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                Ok(SendResult::Queued)
+                Ok(SendStatus::Queued)
             }
             Err(e) => Err(ConnectionError::Io(e).into()),
         }
     }
 
     /// Send a UTF-8 text frame.
-    pub fn send_text(&mut self, text: &str) -> Result<SendResult, Error> {
+    pub fn send_text(&mut self, text: &str) -> Result<SendStatus, Error> {
         let r = self.send_frame(OP_TEXT, text.as_bytes())?;
-        if r == SendResult::Done {
+        if r == SendStatus::Done {
             self.bufs
                 .send
                 .maybe_shrink(self.sess.max_buf_size, &mut self.rng);
@@ -640,12 +704,31 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
     }
 
     /// Send a binary frame.
-    pub fn send_binary(&mut self, data: &[u8]) -> Result<SendResult, Error> {
+    pub fn send_binary(&mut self, data: &[u8]) -> Result<SendStatus, Error> {
         let r = self.send_frame(OP_BINARY, data)?;
-        if r == SendResult::Done {
+        if r == SendStatus::Done {
             self.bufs
                 .send
                 .maybe_shrink(self.sess.max_buf_size, &mut self.rng);
+        }
+        Ok(r)
+    }
+
+    /// Send a ping frame for liveness detection.
+    ///
+    /// If no frame (pong or otherwise) is received by `deadline`,
+    /// the next [`read_message`](Self::read_message) call that
+    /// observes silence will return
+    /// [`ConnectionError::PingTimeout`](crate::ConnectionError::PingTimeout).
+    /// Any received frame clears the deadline — the connection is
+    /// proven alive regardless of whether the frame is a pong.
+    ///
+    /// Only one deadline is active at a time; a second `send_ping`
+    /// replaces the previous deadline.
+    pub fn send_ping(&mut self, deadline: Instant) -> Result<SendStatus, Error> {
+        let r = self.send_frame(OP_PING, &[])?;
+        if r != SendStatus::RetryLater {
+            self.sess.ping_deadline = Some(deadline);
         }
         Ok(r)
     }
@@ -656,10 +739,10 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
     /// payloads are limited to 125 bytes, minus 2 for the status code).
     ///
     /// The connection enters the `CloseSent` state even if the frame is
-    /// only [`Queued`](SendResult::Queued) — the close is committed and
+    /// only [`Queued`](SendStatus::Queued) — the close is committed and
     /// no further data frames may be sent.  Call [`read_message`](Self::read_message)
     /// to await the server's close response.
-    pub fn send_close(&mut self, code: u16, reason: &str) -> Result<SendResult, Error> {
+    pub fn send_close(&mut self, code: u16, reason: &str) -> Result<SendStatus, Error> {
         validate_send_close_code(code)?;
         let reason = reason.as_bytes();
         if reason.len() > 123 {
@@ -670,10 +753,10 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         payload[..2].copy_from_slice(&code.to_be_bytes());
         payload[2..len].copy_from_slice(reason);
         let r = self.send_frame(OP_CLOSE, &payload[..len])?;
-        if r != SendResult::RetryLater {
+        if r != SendStatus::RetryLater {
             self.sess.close_state = CloseState::CloseSent;
         }
-        if r == SendResult::Done {
+        if r == SendStatus::Done {
             self.bufs
                 .send
                 .maybe_shrink(self.sess.max_buf_size, &mut self.rng);
@@ -806,6 +889,8 @@ impl<R: Rng> WebSocket<(), R> {
                 max_flood_score: 1000,
                 subprotocols: None,
                 negotiated_subprotocol: None,
+                ping_deadline: None,
+                last_activity: None,
             },
             rng,
         }
@@ -941,6 +1026,17 @@ impl<S, R: Rng> WebSocket<S, R> {
         &mut self.stream
     }
 
+    /// When the last frame was received, or `None` if no frames have
+    /// been received since connecting.
+    ///
+    /// Updated once per [`read_message`](WebSocket::read_message) call
+    /// that processed at least one frame (data, control, or continuation).
+    /// Use this to implement liveness detection: if `last_activity` is
+    /// stale, send a ping via [`send_ping`](WebSocket::send_ping).
+    pub fn last_activity(&self) -> Option<Instant> {
+        self.sess.last_activity
+    }
+
     /// Disconnect and return the stream and a streamless `WebSocket<()>`
     /// whose buffers can be reused for a subsequent
     /// [`connect`](WebSocket::connect).
@@ -957,6 +1053,8 @@ impl<S, R: Rng> WebSocket<S, R> {
         ws.sess.close_state = CloseState::Open;
         ws.sess.flood_score = 0;
         ws.sess.negotiated_subprotocol = None;
+        ws.sess.ping_deadline = None;
+        ws.sess.last_activity = None;
         (ws, stream)
     }
 
@@ -989,7 +1087,7 @@ impl<S, R: Rng> WebSocket<S, R> {
 
     /// Set the maximum number of frames that
     /// [`read_message`](WebSocket::read_message) will process without
-    /// producing a message before returning `Ok(None)`.
+    /// producing a message before returning [`ReadStatus::Idle`].
     /// Default: `usize::MAX` (unlimited).  Must be at least 1.
     ///
     /// This gives the caller periodic control even when the server

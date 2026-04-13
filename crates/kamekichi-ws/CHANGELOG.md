@@ -9,6 +9,10 @@
 - Subprotocol negotiation via `subprotocols()` builder and `subprotocol()`
   getter (`Sec-WebSocket-Protocol`, RFC 6455 §4).
 - `inner_mut()` for mutable access to the underlying stream.
+- `send_ping(deadline)` for liveness detection.  If no frame arrives
+  by the deadline, the next idle `read_message` returns
+  `ConnectionError::PingTimeout`.
+- `last_activity()` returns when the last frame was received.
 
 ### Changed
 
@@ -21,6 +25,11 @@
   `ConnectionError::ControlFlood` → `ConnectionError::Flood`.
 - Flood relief on completed messages is now proportional to message size,
   so legitimate large-message traffic does not accumulate flood pressure.
+- **Breaking:** `read_message` now returns `ReadStatus` instead of
+  `Option<Message>`.  Use `last_activity()` to distinguish budget
+  exhaustion (recent — connection alive) from I/O silence (stale —
+  consider a ping).
+- **Breaking:** Renamed `SendResult` → `SendStatus`.
 
 ## [0.1.1]
 
