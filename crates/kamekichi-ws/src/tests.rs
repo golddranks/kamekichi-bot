@@ -1944,6 +1944,48 @@ fn try_connect_rejects_header_value_crlf() {
     ));
 }
 
+#[test]
+fn try_connect_rejects_space_in_path() {
+    let result = WebSocket::new(CounterRng(0)).try_connect_with_headers(
+        ConnectMock::auto(),
+        "example.com",
+        "/ws path",
+        &[],
+    );
+    assert!(matches!(
+        result,
+        Err((Error::Fatal(CallerError::InvalidHeaderValue), _, _))
+    ));
+}
+
+#[test]
+fn try_connect_rejects_space_in_header_name() {
+    let result = WebSocket::new(CounterRng(0)).try_connect_with_headers(
+        ConnectMock::auto(),
+        "example.com",
+        "/ws",
+        &[("Bad Name", "value")],
+    );
+    assert!(matches!(
+        result,
+        Err((Error::Fatal(CallerError::InvalidHeaderValue), _, _))
+    ));
+}
+
+#[test]
+fn try_connect_rejects_colon_in_header_name() {
+    let result = WebSocket::new(CounterRng(0)).try_connect_with_headers(
+        ConnectMock::auto(),
+        "example.com",
+        "/ws",
+        &[("Bad:Name", "value")],
+    );
+    assert!(matches!(
+        result,
+        Err((Error::Fatal(CallerError::InvalidHeaderValue), _, _))
+    ));
+}
+
 // ---- inner_mut ----
 
 #[test]

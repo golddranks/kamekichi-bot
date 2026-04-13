@@ -60,13 +60,6 @@ const MAX_HEADER: usize = 8192;
 /// divisor for message-completion flood relief.
 const SMALL_READ_THRESHOLD: usize = 127;
 
-/// Reject values containing CR or LF to prevent CRLF header injection.
-fn validate_header_value(value: &str) -> Result<(), CallerError> {
-    if value.bytes().any(|b| b == b'\r' || b == b'\n') {
-        return Err(CallerError::InvalidHeaderValue);
-    }
-    Ok(())
-}
 
 // Frame header bits (RFC 6455 §5.2)
 const FIN: u8 = 0b1000_0000;
@@ -972,19 +965,14 @@ impl<R: Rng> WebSocket<(), R> {
         path: &str,
         headers: &[(&str, &str)],
     ) -> Result<WebSocket<S, R>, (Error, Self, S)> {
-        if let Err(e) = validate_header_value(host) {
-            return Err((e.into(), self, stream));
-        }
-        if let Err(e) = validate_header_value(path) {
-            return Err((e.into(), self, stream));
-        }
-        for &(name, value) in headers {
-            if let Err(e) = validate_header_value(name) {
-                return Err((e.into(), self, stream));
-            }
-            if let Err(e) = validate_header_value(value) {
-                return Err((e.into(), self, stream));
-            }
+        if host.bytes().any(|b| b.is_ascii_control())
+            || path.bytes().any(|b| b.is_ascii_control() || b == b' ')
+            || headers.iter().any(|&(n, v)| {
+                n.bytes().any(|b| b.is_ascii_control() || b == b' ' || b == b':')
+                    || v.bytes().any(|b| b.is_ascii_control())
+            })
+        {
+            return Err((CallerError::InvalidHeaderValue.into(), self, stream));
         }
         let mut ws = self.with_stream(stream);
         if let Err(e) = ws.handshake(host, path, headers) {
