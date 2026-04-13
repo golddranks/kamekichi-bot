@@ -61,8 +61,8 @@ pub enum ConnectionError {
     InvalidCloseCode(u16),
     /// Server sent a masked frame (clients must not receive masked frames).
     MaskedServerFrame,
-    /// Too many control frames without intervening data frames.
-    ControlFlood,
+    /// Too many frames arrived faster than they could trickle in.
+    Flood,
     /// Server selected a subprotocol that was not offered by the client,
     /// or sent `Sec-WebSocket-Protocol` when the client did not request one.
     InvalidSubprotocol,
@@ -132,7 +132,7 @@ impl std::fmt::Display for ConnectionError {
             }
             ConnectionError::InvalidCloseCode(code) => write!(f, "invalid close code: {code}"),
             ConnectionError::MaskedServerFrame => write!(f, "server sent a masked frame"),
-            ConnectionError::ControlFlood => write!(f, "control frame flood detected"),
+            ConnectionError::Flood => write!(f, "frame flood detected"),
             ConnectionError::InvalidSubprotocol => {
                 write!(f, "server selected an unrequested subprotocol")
             }

@@ -51,8 +51,9 @@ pub const DEFAULT_MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 pub const DEFAULT_MAX_BUF_SIZE: usize = 1024 * 1024;
 const MAX_HEADER: usize = 8192;
 /// Maximum wire size of a single control frame (2-byte header + 125-byte
-/// payload).  Reads of this size or smaller delivered at most one control
-/// frame and count as "trickle" for flood detection.
+/// payload).  Reads of this size or smaller indicate that data arrived
+/// slowly and count as "trickle" for flood detection.  Also used as the
+/// divisor for message-completion flood relief.
 const SMALL_READ_THRESHOLD: usize = 127;
 
 /// Reject values containing CR or LF to prevent CRLF header injection.
@@ -145,14 +146,14 @@ struct Session {
     /// Target buffer capacity. After processing a large message the read
     /// buffer is shrunk back to this size to avoid permanent memory bloat.
     max_buf_size: usize,
-    /// Max control frames processed per [`read_message`] call before
-    /// returning `Ok(None)`.  `usize::MAX` = unlimited.
-    control_frame_budget: usize,
-    /// Running score for control frame flood detection.  Incremented per
-    /// control frame, decremented per small read, reset on data message.
-    control_flood_score: usize,
-    /// Threshold above which [`control_flood_score`] triggers an error.
-    max_control_flood_score: usize,
+    /// Max frames processed per [`read_message`] call without producing
+    /// a message before returning `Ok(None)`.  `usize::MAX` = unlimited.
+    frame_budget: usize,
+    /// Running score for flood detection.  Incremented per frame,
+    /// decremented per small read and per completed message.
+    flood_score: usize,
+    /// Threshold above which [`flood_score`] triggers an error.
+    max_flood_score: usize,
     /// Comma-joined subprotocol tokens to send in `Sec-WebSocket-Protocol`.
     /// `None` means no subprotocol negotiation.
     subprotocols: Option<String>,
@@ -192,7 +193,7 @@ impl Buffers {
                 Err(e) => return Err(e.into()),
             }
         }
-        let mut budget = sess.control_frame_budget;
+        let mut budget = sess.frame_budget;
         loop {
             if self.read.maybe_compact(MAX_HEADER) {
                 self.read.maybe_shrink_capacity(sess.max_buf_size, rng);
@@ -280,11 +281,17 @@ impl Buffers {
                 (fin, opcode, payload_len)
             };
 
-            // A small read means data trickled in (one ping); a big
+            // A small read means data trickled in (one frame); a big
             // read (or no read at all) means data was already buffered.
             let bytes_read = self.read.as_slice().len() - end_before;
             if bytes_read > 0 && bytes_read <= SMALL_READ_THRESHOLD {
-                sess.control_flood_score = sess.control_flood_score.saturating_sub(1);
+                sess.flood_score = sess.flood_score.saturating_sub(1);
+            }
+
+            // Flood detection: every frame adds pressure.
+            sess.flood_score += 1;
+            if sess.flood_score > sess.max_flood_score {
+                return Err(ConnectionError::Flood.into());
             }
 
             let pos = self.read.pos();
@@ -304,7 +311,8 @@ impl Buffers {
                     if fin {
                         let opcode = sess.fragment_opcode;
                         sess.fragment_opcode = 0;
-                        sess.control_flood_score = 0;
+                        let relief = 1.max(self.fragment_buf.len() / SMALL_READ_THRESHOLD);
+                        sess.flood_score = sess.flood_score.saturating_sub(relief);
                         return into_message(opcode, &self.fragment_buf).map(Some);
                     }
                 }
@@ -314,7 +322,8 @@ impl Buffers {
                         return Err(ConnectionError::DataDuringFragmentation.into());
                     }
                     if fin {
-                        sess.control_flood_score = 0;
+                        let relief = 1.max(payload_len / SMALL_READ_THRESHOLD);
+                        sess.flood_score = sess.flood_score.saturating_sub(relief);
                         return into_message(opcode, &self.read.as_slice()[payload_range])
                             .map(Some);
                     }
@@ -341,10 +350,6 @@ impl Buffers {
                             .map(Some);
                         }
                         OP_PING | OP_PONG | _ => {
-                            sess.control_flood_score += 1;
-                            if sess.control_flood_score > sess.max_control_flood_score {
-                                return Err(ConnectionError::ControlFlood.into());
-                            }
                             if opcode == OP_PING {
                                 if self.send.pending_len() < sess.max_buf_size {
                                     build_frame(
@@ -356,15 +361,18 @@ impl Buffers {
                                 }
                                 self.send.try_flush(stream);
                             }
-                            budget = budget.saturating_sub(1);
-                            if budget == 0 {
-                                return Ok(None);
-                            }
                         }
                     }
                 }
 
                 _ => return Err(ConnectionError::UnknownOpcode(opcode).into()),
+            }
+
+            // Budget: yield to the caller after processing too many
+            // frames without producing a message.
+            budget = budget.saturating_sub(1);
+            if budget == 0 {
+                return Ok(None);
             }
         }
     }
@@ -379,7 +387,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         self.bufs.fragment_buf.clear();
         self.sess.fragment_opcode = 0;
         self.sess.close_state = CloseState::Open;
-        self.sess.control_flood_score = 0;
+        self.sess.flood_score = 0;
         self.sess.negotiated_subprotocol = None;
 
         let key = {
@@ -542,8 +550,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
     ///
     /// Returns `Ok(None)` if the underlying stream is non-blocking and no
     /// complete frame is available yet, in case of a timeout, or when the
-    /// [`control_frame_budget`](WebSocket::control_frame_budget) is
-    /// exhausted.
+    /// [`frame_budget`](WebSocket::frame_budget) is exhausted.
     pub fn read_message(&mut self) -> Result<Option<Message<'_>>, Error> {
         if self.sess.close_state == CloseState::Closed {
             return Err(CallerError::Closing.into());
@@ -794,9 +801,9 @@ impl<R: Rng> WebSocket<(), R> {
                 close_state: CloseState::Open,
                 max_payload: DEFAULT_MAX_PAYLOAD,
                 max_buf_size: DEFAULT_MAX_BUF_SIZE,
-                control_frame_budget: usize::MAX,
-                control_flood_score: 0,
-                max_control_flood_score: 1000,
+                frame_budget: usize::MAX,
+                flood_score: 0,
+                max_flood_score: 1000,
                 subprotocols: None,
                 negotiated_subprotocol: None,
             },
@@ -948,7 +955,7 @@ impl<S, R: Rng> WebSocket<S, R> {
         ws.bufs.fragment_buf.clear();
         ws.sess.fragment_opcode = 0;
         ws.sess.close_state = CloseState::Open;
-        ws.sess.control_flood_score = 0;
+        ws.sess.flood_score = 0;
         ws.sess.negotiated_subprotocol = None;
         (ws, stream)
     }
@@ -980,28 +987,30 @@ impl<S, R: Rng> WebSocket<S, R> {
         self
     }
 
-    /// Set the maximum number of control frames (ping/pong) that
-    /// [`read_message`](WebSocket::read_message) will process before
-    /// returning `Ok(None)`.  Default: `usize::MAX` (unlimited).
-    /// Must be at least 1.
+    /// Set the maximum number of frames that
+    /// [`read_message`](WebSocket::read_message) will process without
+    /// producing a message before returning `Ok(None)`.
+    /// Default: `usize::MAX` (unlimited).  Must be at least 1.
     ///
     /// This gives the caller periodic control even when the server
-    /// sends many pings without data frames.
-    pub fn control_frame_budget(mut self, budget: usize) -> Self {
-        assert!(budget >= 1, "control_frame_budget must be at least 1");
-        self.sess.control_frame_budget = budget;
+    /// sends many control frames or continuation fragments without
+    /// completing a message.
+    pub fn frame_budget(mut self, budget: usize) -> Self {
+        assert!(budget >= 1, "frame_budget must be at least 1");
+        self.sess.frame_budget = budget;
         self
     }
 
-    /// Set the threshold for control frame flood detection.
+    /// Set the threshold for frame flood detection.
     ///
-    /// The score increments for each control frame processed and
-    /// decrements for each small read (≤ 127 bytes) from the OS,
-    /// resetting when a data message is delivered.  A burst of
-    /// control frames drives the score up; a trickle of lone pings
-    /// keeps it near zero.  Default: 1000.
-    pub fn max_control_flood_score(mut self, max: usize) -> Self {
-        self.sess.max_control_flood_score = max;
+    /// The score increments for each frame processed, decrements
+    /// for each small read (≤ 127 bytes) from the OS, and
+    /// decrements on each completed message proportionally to its
+    /// size.  A burst of pre-buffered frames drives the score up;
+    /// frames arriving one at a time keep it near zero.
+    /// Default: 1000.
+    pub fn max_flood_score(mut self, max: usize) -> Self {
+        self.sess.max_flood_score = max;
         self
     }
 

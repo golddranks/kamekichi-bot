@@ -904,7 +904,7 @@ impl Write for WriteBlockingMock {
 // ---- Flood detection ----
 
 #[test]
-fn control_frame_flood_detected() {
+fn flood_detected() {
     // All pings pre-buffered → large initial read, then bytes_read=0
     // for subsequent frames → no score decrement → score climbs.
     let mut data = Vec::new();
@@ -912,12 +912,12 @@ fn control_frame_flood_detected() {
         data.extend(frame(true, OP_PING, b""));
     }
     let mut ws = WebSocket::new(CounterRng(0))
-        .max_control_flood_score(3)
+        .max_flood_score(3)
         .with_stream(MockStream::new(data));
 
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::ControlFlood))
+        Err(Error::Reconnect(ConnectionError::Flood))
     ));
 }
 
@@ -1045,7 +1045,7 @@ fn recv_close_code_1015_rejected() {
 // ---- Control frame budget ----
 
 #[test]
-fn control_frame_budget_returns_none() {
+fn frame_budget_returns_none() {
     let mut data = Vec::new();
     for _ in 0..5 {
         data.extend(frame(true, OP_PING, b""));
@@ -1053,7 +1053,7 @@ fn control_frame_budget_returns_none() {
     data.extend(frame(true, OP_TEXT, b"after"));
 
     let mut ws = WebSocket::new(CounterRng(0))
-        .control_frame_budget(3)
+        .frame_budget(3)
         .with_stream(MockStream::new(data));
 
     // First call: processes 3 pings, budget exhausted
@@ -1138,7 +1138,7 @@ fn connection_error_display() {
         ConnectionError::MissingConnection,
         ConnectionError::InvalidCloseCode(9999),
         ConnectionError::MaskedServerFrame,
-        ConnectionError::ControlFlood,
+        ConnectionError::Flood,
         ConnectionError::InvalidSubprotocol,
     ];
     for e in cases {
@@ -1930,6 +1930,32 @@ fn try_connect_rejects_header_value_crlf() {
 fn inner_mut_accessible() {
     let mut ws = ws(frame(true, OP_TEXT, b"hi"));
     let _stream: &mut MockStream = ws.inner_mut();
+}
+
+// ---- Frame budget on continuation frames ----
+
+#[test]
+fn frame_budget_on_continuation_frames() {
+    let mut data = Vec::new();
+    data.extend(frame(false, OP_TEXT, b"1"));
+    for i in 2..=6 {
+        data.extend(frame(false, OP_CONTINUATION, &[b'0' + i]));
+    }
+    data.extend(frame(true, OP_CONTINUATION, b"7"));
+
+    let mut ws = WebSocket::new(CounterRng(0))
+        .frame_budget(3)
+        .with_stream(MockStream::new(data));
+
+    // First call: frames 1,2,3 → budget exhausted
+    assert!(matches!(ws.read_message(), Ok(None)));
+    // Second call: frames 4,5,6 → budget exhausted
+    assert!(matches!(ws.read_message(), Ok(None)));
+    // Third call: frame 7 (FIN) → completed message
+    match ws.read_message().unwrap().unwrap() {
+        Message::Text(t) => assert_eq!(t, "1234567"),
+        other => panic!("expected Text, got {other:?}"),
+    }
 }
 
 // ---- Rng default next_u32 ----
