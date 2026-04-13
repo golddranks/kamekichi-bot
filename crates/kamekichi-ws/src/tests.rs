@@ -5,7 +5,7 @@
 use std::io::{self, Cursor};
 
 use super::*;
-use crate::ConnectionError;
+use crate::ConnectionError as ConnError;
 use crate::Rng;
 use crate::read_buf::{FillError, ReadBuf};
 use crate::send_buf::SendBuf;
@@ -145,7 +145,7 @@ fn payload_too_large() {
     let mut ws = ws(data);
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::PayloadTooLarge(_)))
+        Err(Error::Reconnect(ConnError::PayloadTooLarge(_)))
     ));
 }
 
@@ -157,7 +157,7 @@ fn masked_server_frame_rejected() {
     let mut ws = ws(masked_frame(true, OP_TEXT, b"hello", mask));
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::MaskedServerFrame))
+        Err(Error::Reconnect(ConnError::MaskedServerFrame))
     ));
 }
 
@@ -229,7 +229,7 @@ fn close_one_byte_is_error() {
     let mut ws = ws(frame(true, OP_CLOSE, b"x"));
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::BadClosePayload))
+        Err(Error::Reconnect(ConnError::BadClosePayload))
     ));
 }
 
@@ -238,7 +238,7 @@ fn fragmented_control_is_error() {
     let mut ws = ws(frame(false, OP_PING, b""));
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::FragmentedControl))
+        Err(Error::Reconnect(ConnError::FragmentedControl))
     ));
 }
 
@@ -247,9 +247,7 @@ fn control_payload_too_large() {
     let mut ws = ws(frame(true, OP_PING, &[0u8; 126]));
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::ControlPayloadTooLarge(
-            126
-        )))
+        Err(Error::Reconnect(ConnError::ControlPayloadTooLarge(126)))
     ));
 }
 
@@ -295,7 +293,7 @@ fn unexpected_continuation() {
     let mut ws = ws(frame(true, OP_CONTINUATION, b"oops"));
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::UnexpectedContinuation))
+        Err(Error::Reconnect(ConnError::UnexpectedContinuation))
     ));
 }
 
@@ -306,7 +304,7 @@ fn data_during_fragmentation() {
     let mut ws = ws(data);
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::DataDuringFragmentation))
+        Err(Error::Reconnect(ConnError::DataDuringFragmentation))
     ));
 }
 
@@ -317,7 +315,7 @@ fn reserved_bits_set() {
     let mut ws = ws(vec![0x80 | 0x10 | OP_TEXT, 0]); // RSV1 set
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::BadReservedBits(_)))
+        Err(Error::Reconnect(ConnError::BadReservedBits(_)))
     ));
 }
 
@@ -326,7 +324,7 @@ fn unknown_opcode() {
     let mut ws = ws(vec![0x80 | 0x03, 0]); // opcode 3 is reserved
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::UnknownOpcode(3)))
+        Err(Error::Reconnect(ConnError::UnknownOpcode(3)))
     ));
 }
 
@@ -334,7 +332,7 @@ fn unknown_opcode() {
 fn invalid_utf8_text() {
     let mut ws = ws(frame(true, OP_TEXT, &[0xFF, 0xFE]));
     match ws.read_message() {
-        Err(Error::Reconnect(ConnectionError::InvalidUtf8(_))) => {}
+        Err(Error::Reconnect(ConnError::InvalidUtf8(_))) => {}
         other => panic!("expected InvalidUtf8, got {other:?}"),
     }
 }
@@ -346,7 +344,7 @@ fn eof_mid_frame() {
     let mut ws = ws(data);
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::Closed))
+        Err(Error::Reconnect(ConnError::Closed))
     ));
 }
 
@@ -649,7 +647,7 @@ fn connect_bad_status() {
     let rx = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec();
     assert!(matches!(
         WebSocket::new(CounterRng(0)).connect(ConnectMock::with_response(rx), "example.com", "/"),
-        Err(Error::Reconnect(ConnectionError::BadStatus))
+        Err(Error::Reconnect(ConnError::BadStatus))
     ));
 }
 
@@ -661,7 +659,7 @@ fn connect_missing_accept() {
         .to_vec();
     assert!(matches!(
         WebSocket::new(CounterRng(0)).connect(ConnectMock::with_response(rx), "example.com", "/"),
-        Err(Error::Reconnect(ConnectionError::MissingAccept))
+        Err(Error::Reconnect(ConnError::MissingAccept))
     ));
 }
 
@@ -673,7 +671,7 @@ fn connect_bad_accept() {
         .to_vec();
     assert!(matches!(
         WebSocket::new(CounterRng(0)).connect(ConnectMock::with_response(rx), "example.com", "/"),
-        Err(Error::Reconnect(ConnectionError::BadAccept))
+        Err(Error::Reconnect(ConnError::BadAccept))
     ));
 }
 
@@ -682,7 +680,7 @@ fn connect_headers_too_large() {
     let rx = vec![b'X'; 8300];
     assert!(matches!(
         WebSocket::new(CounterRng(0)).connect(ConnectMock::with_response(rx), "example.com", "/"),
-        Err(Error::Reconnect(ConnectionError::HeadersTooLarge))
+        Err(Error::Reconnect(ConnError::HeadersTooLarge))
     ));
 }
 
@@ -694,7 +692,7 @@ fn connect_missing_upgrade() {
             "example.com",
             "/"
         ),
-        Err(Error::Reconnect(ConnectionError::MissingUpgrade))
+        Err(Error::Reconnect(ConnError::MissingUpgrade))
     ));
 }
 
@@ -706,7 +704,7 @@ fn connect_missing_connection() {
             "example.com",
             "/"
         ),
-        Err(Error::Reconnect(ConnectionError::MissingConnection))
+        Err(Error::Reconnect(ConnError::MissingConnection))
     ));
 }
 
@@ -715,7 +713,7 @@ fn connect_eof_mid_headers() {
     let rx = b"HTTP/1.1 101 Switch".to_vec();
     assert!(matches!(
         WebSocket::new(CounterRng(0)).connect(ConnectMock::with_response(rx), "example.com", "/"),
-        Err(Error::Reconnect(ConnectionError::Closed))
+        Err(Error::Reconnect(ConnError::Closed))
     ));
 }
 
@@ -854,7 +852,7 @@ fn partial_read_masked_frame_rejected() {
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(ChunkedMock::new(data, 1));
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::MaskedServerFrame))
+        Err(Error::Reconnect(ConnError::MaskedServerFrame))
     ));
 }
 
@@ -920,7 +918,7 @@ fn flood_detected() {
 
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::Flood))
+        Err(Error::Reconnect(ConnError::Flood))
     ));
 }
 
@@ -961,9 +959,7 @@ fn fragmented_message_too_large() {
 
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(
-            ConnectionError::FragmentedMessageTooLarge(200)
-        ))
+        Err(Error::Reconnect(ConnError::FragmentedMessageTooLarge(200)))
     ));
 }
 
@@ -981,7 +977,7 @@ fn non_minimal_16bit_length() {
     let mut ws = ws(data);
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::NonMinimalLength))
+        Err(Error::Reconnect(ConnError::NonMinimalLength))
     ));
 }
 
@@ -997,7 +993,7 @@ fn non_minimal_64bit_length() {
     let mut ws = ws(data);
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::NonMinimalLength))
+        Err(Error::Reconnect(ConnError::NonMinimalLength))
     ));
 }
 
@@ -1012,7 +1008,7 @@ fn payload_length_msb_set() {
     let mut ws = ws(data);
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::PayloadLengthMsb))
+        Err(Error::Reconnect(ConnError::PayloadLengthMsb))
     ));
 }
 
@@ -1023,7 +1019,7 @@ fn recv_close_code_1005_rejected() {
     let mut ws = ws(frame(true, OP_CLOSE, &1005u16.to_be_bytes()));
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::InvalidCloseCode(1005)))
+        Err(Error::Reconnect(ConnError::InvalidCloseCode(1005)))
     ));
 }
 
@@ -1032,7 +1028,7 @@ fn recv_close_code_1006_rejected() {
     let mut ws = ws(frame(true, OP_CLOSE, &1006u16.to_be_bytes()));
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::InvalidCloseCode(1006)))
+        Err(Error::Reconnect(ConnError::InvalidCloseCode(1006)))
     ));
 }
 
@@ -1041,7 +1037,7 @@ fn recv_close_code_1015_rejected() {
     let mut ws = ws(frame(true, OP_CLOSE, &1015u16.to_be_bytes()));
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::InvalidCloseCode(1015)))
+        Err(Error::Reconnect(ConnError::InvalidCloseCode(1015)))
     ));
 }
 
@@ -1080,7 +1076,7 @@ fn try_connect_recovers_on_handshake_failure() {
     else {
         panic!("expected error");
     };
-    assert!(matches!(err, Error::Reconnect(ConnectionError::BadStatus)));
+    assert!(matches!(err, Error::Reconnect(ConnError::BadStatus)));
     // Recovered WebSocket can be reused for a new connection.
     let _ws = ws
         .connect(ConnectMock::auto(), "example.com", "/ws")
@@ -1118,32 +1114,32 @@ fn make_utf8_error() -> std::str::Utf8Error {
 
 #[test]
 fn connection_error_display() {
-    let cases: &[ConnectionError] = &[
-        ConnectionError::Io(io::Error::other("test")),
-        ConnectionError::Closed,
-        ConnectionError::HeadersTooLarge,
-        ConnectionError::BadStatus,
-        ConnectionError::MissingAccept,
-        ConnectionError::BadAccept,
-        ConnectionError::BadReservedBits(0x10),
-        ConnectionError::PayloadTooLarge(999),
-        ConnectionError::UnexpectedContinuation,
-        ConnectionError::FragmentedMessageTooLarge(999),
-        ConnectionError::InvalidUtf8(make_utf8_error()),
-        ConnectionError::DataDuringFragmentation,
-        ConnectionError::FragmentedControl,
-        ConnectionError::ControlPayloadTooLarge(200),
-        ConnectionError::BadClosePayload,
-        ConnectionError::UnknownOpcode(0x03),
-        ConnectionError::NonMinimalLength,
-        ConnectionError::PayloadLengthMsb,
-        ConnectionError::MissingUpgrade,
-        ConnectionError::MissingConnection,
-        ConnectionError::InvalidCloseCode(9999),
-        ConnectionError::MaskedServerFrame,
-        ConnectionError::Flood,
-        ConnectionError::InvalidSubprotocol,
-        ConnectionError::PingTimeout,
+    let cases: &[ConnError] = &[
+        ConnError::Io(io::Error::other("test")),
+        ConnError::Closed,
+        ConnError::HeadersTooLarge,
+        ConnError::BadStatus,
+        ConnError::MissingAccept,
+        ConnError::BadAccept,
+        ConnError::BadReservedBits(0x10),
+        ConnError::PayloadTooLarge(999),
+        ConnError::UnexpectedContinuation,
+        ConnError::FragmentedMessageTooLarge(999),
+        ConnError::InvalidUtf8(make_utf8_error()),
+        ConnError::DataDuringFragmentation,
+        ConnError::FragmentedControl,
+        ConnError::ControlPayloadTooLarge(200),
+        ConnError::BadClosePayload,
+        ConnError::UnknownOpcode(0x03),
+        ConnError::NonMinimalLength,
+        ConnError::PayloadLengthMsb,
+        ConnError::MissingUpgrade,
+        ConnError::MissingConnection,
+        ConnError::InvalidCloseCode(9999),
+        ConnError::MaskedServerFrame,
+        ConnError::Flood,
+        ConnError::InvalidSubprotocol,
+        ConnError::PingTimeout,
     ];
     for e in cases {
         assert!(!e.to_string().is_empty());
@@ -1152,11 +1148,11 @@ fn connection_error_display() {
 
 #[test]
 fn connection_error_source() {
-    let io_err = ConnectionError::Io(io::Error::other("t"));
+    let io_err = ConnError::Io(io::Error::other("t"));
     assert!(std::error::Error::source(&io_err).is_some());
-    let utf8_err = ConnectionError::InvalidUtf8(make_utf8_error());
+    let utf8_err = ConnError::InvalidUtf8(make_utf8_error());
     assert!(std::error::Error::source(&utf8_err).is_some());
-    let other = ConnectionError::Closed;
+    let other = ConnError::Closed;
     assert!(std::error::Error::source(&other).is_none());
 }
 
@@ -1177,7 +1173,7 @@ fn caller_error_display() {
 
 #[test]
 fn error_display_and_source() {
-    let r = Error::Reconnect(ConnectionError::Closed);
+    let r = Error::Reconnect(ConnError::Closed);
     assert!(!r.to_string().is_empty());
     assert!(std::error::Error::source(&r).is_some());
     let f = Error::Fatal(CallerError::Closing);
@@ -1187,11 +1183,11 @@ fn error_display_and_source() {
 
 #[test]
 fn from_impls() {
-    // From<Utf8Error> for ConnectionError
-    let _: ConnectionError = make_utf8_error().into();
-    // From<FillError::BufferFull> for ConnectionError
-    let e: ConnectionError = FillError::BufferFull.into();
-    assert!(matches!(e, ConnectionError::HeadersTooLarge));
+    // From<Utf8Error> for ConnError
+    let _: ConnError = make_utf8_error().into();
+    // From<FillError::BufferFull> for ConnError
+    let e: ConnError = FillError::BufferFull.into();
+    assert!(matches!(e, ConnError::HeadersTooLarge));
     // From<io::Error> for Error
     let _: Error = io::Error::other("t").into();
     // From<Utf8Error> for Error
@@ -1252,7 +1248,7 @@ fn recv_close_code_out_of_range() {
     let mut ws = ws(frame(true, OP_CLOSE, &5000u16.to_be_bytes()));
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::InvalidCloseCode(5000)))
+        Err(Error::Reconnect(ConnError::InvalidCloseCode(5000)))
     ));
 }
 
@@ -1278,7 +1274,7 @@ fn data_frame_exceeds_max_payload() {
         .with_stream(MockStream::new(frame(true, OP_TEXT, &payload)));
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::PayloadTooLarge(126)))
+        Err(Error::Reconnect(ConnError::PayloadTooLarge(126)))
     ));
 }
 
@@ -1512,7 +1508,7 @@ fn send_pending_flush_hard_error() {
     // Second send: has_pending, flush → ConnectionReset
     assert!(matches!(
         ws.send_text("b"),
-        Err(Error::Reconnect(ConnectionError::Io(_)))
+        Err(Error::Reconnect(ConnError::Io(_)))
     ));
 }
 
@@ -1521,7 +1517,7 @@ fn send_frame_flush_hard_error() {
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(WriteErrorMock);
     assert!(matches!(
         ws.send_text("hello"),
-        Err(Error::Reconnect(ConnectionError::Io(_)))
+        Err(Error::Reconnect(ConnError::Io(_)))
     ));
 }
 
@@ -1530,7 +1526,7 @@ fn send_write_zero_is_closed() {
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(WriteZeroMock);
     assert!(matches!(
         ws.send_text("hello"),
-        Err(Error::Reconnect(ConnectionError::Closed))
+        Err(Error::Reconnect(ConnError::Closed))
     ));
 }
 
@@ -1582,7 +1578,7 @@ fn flush_pending_hard_error() {
     assert_eq!(ws.send_text("a").unwrap(), SendStatus::Queued);
     assert!(matches!(
         ws.flush(),
-        Err(Error::Reconnect(ConnectionError::Io(_)))
+        Err(Error::Reconnect(ConnError::Io(_)))
     ));
 }
 
@@ -1606,7 +1602,7 @@ fn flush_stream_flush_hard_error() {
     let mut ws = WebSocket::new(CounterRng(0)).with_stream(stream);
     assert!(matches!(
         ws.flush(),
-        Err(Error::Reconnect(ConnectionError::Io(_)))
+        Err(Error::Reconnect(ConnError::Io(_)))
     ));
 }
 
@@ -1718,10 +1714,7 @@ fn send_buf_flush_write_zero() {
     let mut send = SendBuf::with_capacity(16);
     send.push(b"hello");
     let mut stream = WriteZeroMock;
-    assert!(matches!(
-        send.flush(&mut stream),
-        Err(ConnectionError::Closed)
-    ));
+    assert!(matches!(send.flush(&mut stream), Err(ConnError::Closed)));
 }
 
 // ---- read_buf::read_until coverage ----
@@ -1809,7 +1802,7 @@ fn pending_send_hard_error_during_read() {
     // Second read: pending pong flush → hard error
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::Io(_)))
+        Err(Error::Reconnect(ConnError::Io(_)))
     ));
 }
 
@@ -1882,7 +1875,7 @@ fn connect_subprotocol_not_offered() {
         );
     assert!(matches!(
         result,
-        Err(Error::Reconnect(ConnectionError::InvalidSubprotocol))
+        Err(Error::Reconnect(ConnError::InvalidSubprotocol))
     ));
 }
 
@@ -1896,7 +1889,7 @@ fn connect_subprotocol_unrequested() {
     );
     assert!(matches!(
         result,
-        Err(Error::Reconnect(ConnectionError::InvalidSubprotocol))
+        Err(Error::Reconnect(ConnError::InvalidSubprotocol))
     ));
 }
 
@@ -2078,7 +2071,7 @@ fn ping_timeout_on_silence() {
         .unwrap();
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::PingTimeout))
+        Err(Error::Reconnect(ConnError::PingTimeout))
     ));
 }
 
@@ -2092,7 +2085,7 @@ fn ping_deadline_not_set_on_retry_later() {
     // Deadline not set, so read returns Closed (EOF), not PingTimeout.
     assert!(matches!(
         ws.read_message(),
-        Err(Error::Reconnect(ConnectionError::Closed))
+        Err(Error::Reconnect(ConnError::Closed))
     ));
 }
 
@@ -2238,8 +2231,8 @@ const _: () = {
     fn _assertions() {
         _assert_send::<Error>();
         _assert_sync::<Error>();
-        _assert_send::<ConnectionError>();
-        _assert_sync::<ConnectionError>();
+        _assert_send::<ConnError>();
+        _assert_sync::<ConnError>();
         _assert_send::<CallerError>();
         _assert_sync::<CallerError>();
     }

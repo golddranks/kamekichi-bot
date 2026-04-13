@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use base64::Engine;
 
-use crate::error::{CallerError, ConnectionError};
+use crate::error::{CallerError, ConnectionError as ConnError};
 use crate::read_buf::ReadBuf;
 use crate::rng::Rng;
 use crate::send_buf::SendBuf;
@@ -88,7 +88,7 @@ pub(crate) struct Session {
     pub(crate) negotiated_subprotocol: Option<String>,
     /// Deadline by which a pong (or any frame) must arrive after a
     /// [`send_ping`](WebSocket::send_ping).  Cleared when any frame
-    /// is received; triggers [`ConnectionError::PingTimeout`] if
+    /// is received; triggers [`ConnError::PingTimeout`] if
     /// exceeded during an idle [`read_message`] call.
     pub(crate) ping_deadline: Option<Instant>,
     /// When the last frame was received.  Updated on every
@@ -112,7 +112,7 @@ impl Buffers {
         stream: &mut S,
         sess: &mut Session,
         rng: &mut R,
-    ) -> Result<Option<Message<'_>>, ConnectionError> {
+    ) -> Result<Option<Message<'_>>, ConnError> {
         // If a previous send (e.g. a pong reply) was only partially
         // written to the stream, finish sending it now.
         if self.send.has_pending() {
@@ -160,14 +160,14 @@ impl Buffers {
 
                 let rsv = byte0 & RESERVED_MASK;
                 if rsv != 0 {
-                    return Err(ConnectionError::BadReservedBits(rsv));
+                    return Err(ConnError::BadReservedBits(rsv));
                 }
 
                 let fin = byte0 & FIN != 0;
                 let opcode = byte0 & OPCODE_MASK;
                 let masked = byte1 & MASK_BIT != 0;
                 if masked {
-                    return Err(ConnectionError::MaskedServerFrame);
+                    return Err(ConnError::MaskedServerFrame);
                 }
                 let len_byte = (byte1 & LEN_MASK) as usize;
 
@@ -178,10 +178,10 @@ impl Buffers {
                         let hdr = self.read.pending();
                         let len = u16::from_be_bytes([hdr[2], hdr[3]]) as usize;
                         if len < 126 {
-                            return Err(ConnectionError::NonMinimalLength);
+                            return Err(ConnError::NonMinimalLength);
                         }
                         if len > sess.max_payload {
-                            return Err(ConnectionError::PayloadTooLarge(len as u64));
+                            return Err(ConnError::PayloadTooLarge(len as u64));
                         }
                         (4, len)
                     }
@@ -190,13 +190,13 @@ impl Buffers {
                         let hdr = self.read.pending();
                         let len = u64::from_be_bytes(hdr[2..10].try_into().unwrap());
                         if len >> 63 != 0 {
-                            return Err(ConnectionError::PayloadLengthMsb);
+                            return Err(ConnError::PayloadLengthMsb);
                         }
                         if len < 65536 {
-                            return Err(ConnectionError::NonMinimalLength);
+                            return Err(ConnError::NonMinimalLength);
                         }
                         if len > sess.max_payload as u64 {
-                            return Err(ConnectionError::PayloadTooLarge(len));
+                            return Err(ConnError::PayloadTooLarge(len));
                         }
                         (10, len as usize)
                     }
@@ -205,10 +205,10 @@ impl Buffers {
 
                 if opcode >= OP_CLOSE {
                     if !fin {
-                        return Err(ConnectionError::FragmentedControl);
+                        return Err(ConnError::FragmentedControl);
                     }
                     if payload_len > 125 {
-                        return Err(ConnectionError::ControlPayloadTooLarge(payload_len));
+                        return Err(ConnError::ControlPayloadTooLarge(payload_len));
                     }
                 }
 
@@ -229,7 +229,7 @@ impl Buffers {
             // Flood detection: every frame adds pressure.
             sess.flood_score += 1;
             if sess.flood_score > sess.max_flood_score {
-                return Err(ConnectionError::Flood);
+                return Err(ConnError::Flood);
             }
 
             let pos = self.read.pos();
@@ -238,11 +238,11 @@ impl Buffers {
             match opcode {
                 OP_CONTINUATION => {
                     if sess.fragment_opcode == 0 {
-                        return Err(ConnectionError::UnexpectedContinuation);
+                        return Err(ConnError::UnexpectedContinuation);
                     }
                     let total = self.fragment_buf.len() + payload_len;
                     if total > sess.max_payload {
-                        return Err(ConnectionError::FragmentedMessageTooLarge(total));
+                        return Err(ConnError::FragmentedMessageTooLarge(total));
                     }
                     self.fragment_buf
                         .extend_from_slice(&self.read.filled()[payload_range]);
@@ -257,7 +257,7 @@ impl Buffers {
 
                 OP_TEXT | OP_BINARY => {
                     if sess.fragment_opcode != 0 {
-                        return Err(ConnectionError::DataDuringFragmentation);
+                        return Err(ConnError::DataDuringFragmentation);
                     }
                     if fin {
                         let relief = 1.max(payload_len / SMALL_READ_THRESHOLD);
@@ -305,7 +305,7 @@ impl Buffers {
                     }
                 }
 
-                _ => return Err(ConnectionError::UnknownOpcode(opcode)),
+                _ => return Err(ConnError::UnknownOpcode(opcode)),
             }
 
             // Budget: yield to the caller after processing too many
@@ -343,7 +343,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         host: &str,
         path: &str,
         headers: &[(&str, &str)],
-    ) -> Result<(), ConnectionError> {
+    ) -> Result<(), ConnError> {
         self.bufs.read.clear();
         self.bufs.send.clear();
         self.bufs.line_ends.clear();
@@ -396,10 +396,9 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
             let mut scan = 0;
             let mut prev_nl: Option<usize> = None;
             let line_ends = &mut self.bufs.line_ends;
-            self.bufs.read.read_until::<_, ConnectionError>(
-                &mut self.stream,
-                MAX_HEADER,
-                |buf| {
+            self.bufs
+                .read
+                .read_until::<_, ConnError>(&mut self.stream, MAX_HEADER, |buf| {
                     let data = buf.pending();
                     let limit = data.len().min(MAX_HEADER);
                     while let Some(off) = data[scan..limit].iter().position(|&b| b == b'\n') {
@@ -415,11 +414,10 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                         scan = nl + 1;
                     }
                     if data.len() >= MAX_HEADER {
-                        return Err(ConnectionError::HeadersTooLarge);
+                        return Err(ConnError::HeadersTooLarge);
                     }
                     Ok(None)
-                },
-            )?
+                })?
         };
 
         {
@@ -428,7 +426,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
             if !(data[..header_end].starts_with(status)
                 && matches!(data[status.len()], b' ' | b'\r' | b'\n'))
             {
-                return Err(ConnectionError::BadStatus);
+                return Err(ConnError::BadStatus);
             }
         }
 
@@ -470,15 +468,15 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                 line_start = nl + 1;
             }
 
-            let accept = accept.ok_or(ConnectionError::MissingAccept)?;
+            let accept = accept.ok_or(ConnError::MissingAccept)?;
             if accept != expected {
-                return Err(ConnectionError::BadAccept);
+                return Err(ConnError::BadAccept);
             }
             if !has_upgrade {
-                return Err(ConnectionError::MissingUpgrade);
+                return Err(ConnError::MissingUpgrade);
             }
             if !has_connection {
-                return Err(ConnectionError::MissingConnection);
+                return Err(ConnError::MissingConnection);
             }
 
             // RFC 6455 §4.2.2: if the server sends Sec-WebSocket-Protocol,
@@ -488,11 +486,11 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                 match self.sess.subprotocols {
                     Some(ref offered) => {
                         if !offered.split(',').any(|t| t.trim() == selected) {
-                            return Err(ConnectionError::InvalidSubprotocol);
+                            return Err(ConnError::InvalidSubprotocol);
                         }
                         self.sess.negotiated_subprotocol = Some(selected.to_owned());
                     }
-                    None => return Err(ConnectionError::InvalidSubprotocol),
+                    None => return Err(ConnError::InvalidSubprotocol),
                 }
             }
         }
@@ -566,15 +564,15 @@ pub(crate) fn validate_send_close_code(code: u16) -> Result<(), CallerError> {
     }
 }
 
-fn validate_recv_close_code(code: u16) -> Result<(), ConnectionError> {
+fn validate_recv_close_code(code: u16) -> Result<(), ConnError> {
     match code {
-        1005 | 1006 | 1015 => Err(ConnectionError::InvalidCloseCode(code)),
+        1005 | 1006 | 1015 => Err(ConnError::InvalidCloseCode(code)),
         1000..=4999 => Ok(()),
-        _ => Err(ConnectionError::InvalidCloseCode(code)),
+        _ => Err(ConnError::InvalidCloseCode(code)),
     }
 }
 
-fn into_message<'a>(opcode: u8, buf: &'a [u8]) -> Result<Message<'a>, ConnectionError> {
+fn into_message<'a>(opcode: u8, buf: &'a [u8]) -> Result<Message<'a>, ConnError> {
     match opcode {
         OP_TEXT => Ok(Message::Text(std::str::from_utf8(buf)?)),
         OP_BINARY => Ok(Message::Binary(buf)),
@@ -589,9 +587,9 @@ fn handle_close<'a>(
     rng: &mut impl Rng,
     payload: &'a [u8],
     echo: bool,
-) -> Result<Message<'a>, ConnectionError> {
+) -> Result<Message<'a>, ConnError> {
     if payload.len() == 1 {
-        return Err(ConnectionError::BadClosePayload);
+        return Err(ConnError::BadClosePayload);
     }
     let (code, reason) = if payload.len() >= 2 {
         let code = u16::from_be_bytes([payload[0], payload[1]]);
