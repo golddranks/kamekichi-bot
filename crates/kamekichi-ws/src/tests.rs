@@ -2285,6 +2285,56 @@ fn mask_benchmark() {
     }
 }
 
+// ---- Bug: stale tail_len after successful tail completion ----
+
+#[test]
+fn fragmented_text_stale_tail_len() {
+    // Bug: push_text_payload doesn't reset tail_len to 0 after
+    // successfully completing a pending multi-byte sequence.
+    //
+    // Fragment 1: [0xC3]         — half of 'ä', stored in tail (tail_len=1)
+    // Fragment 2: [0xA4, A, B, C] — completes 'ä' + "ABC", tail_len NOT reset
+    // Fragment 3: [D, E]          — stale tail causes spurious InvalidUtf8
+    //
+    // Expected: "äABCDE"
+    let mut data = frame(false, OP_TEXT, &[0xC3]);
+    data.extend(frame(false, OP_CONTINUATION, &[0xA4, b'A', b'B', b'C']));
+    data.extend(frame(true, OP_CONTINUATION, b"DE"));
+    let mut ws = ws(data);
+    match ws.read_message().unwrap().message().unwrap() {
+        Message::Text(t) => assert_eq!(t, "äABCDE"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+// ---- Bug: only first utf8_chunk examined in main data path ----
+
+#[test]
+fn fragmented_text_mid_fragment_invalid_utf8_detected_immediately() {
+    // Bug: push_text_payload only calls utf8_chunks().next() on the
+    // main data path. An invalid byte followed by valid bytes in a
+    // non-final fragment is misidentified as a potential incomplete
+    // trailing sequence and stashed in the tail instead of erroring.
+    //
+    // Fragment 1: [0xFF, 'A']  — 0xFF is never valid in UTF-8, and
+    //   it's followed by 'A', so it can't be a trailing incomplete
+    //   sequence. Should error immediately.
+    //
+    // With frame_budget(1), only fragment 1 is processed per call.
+    // Correct: first call errors (InvalidUtf8 on fragment 1).
+    // Bug: first call returns Idle (0xFF stashed in tail, 'A' dropped),
+    //   error deferred to fragment 2.
+    let mut data = frame(false, OP_TEXT, &[0xFF, b'A']);
+    data.extend(frame(true, OP_CONTINUATION, b"B"));
+    let mut ws = WebSocket::new(CounterRng(0))
+        .frame_budget(1)
+        .with_stream(MockStream::new(data));
+    assert!(matches!(
+        ws.read_message(),
+        Err(Error::Reconnect(ConnError::InvalidUtf8(_)))
+    ));
+}
+
 // ---- Send + Sync static assertions ----
 
 const _: () = {

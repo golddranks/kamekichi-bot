@@ -664,21 +664,29 @@ fn push_text_payload(
             .expect("utf8_chunks always yields at least one chunk");
 
         let (val, inv) = (chunk.valid(), chunk.invalid());
-        if !val.is_empty() {
-            // a valid chunk that couldn't be parsed before,
-            // was succesfully parsed → we made progress past the boundary
-            text.push_str(val);
-            val.len() - tl
-        } else if inv.len() < 4 && !is_final {
-            // not enough data for fully parsing, so we'll just
-            // store the bytes in the tail buffer for the next fragment
-            tail[..inv.len()].copy_from_slice(inv);
-            *tail_len = inv.len() as u8;
-            return Ok(());
+        if val.is_empty() {
+            // Parsing progress was not made
+            if is_final || tl + take >= 4 {
+                // No valid UTF-8 chunk could be parsed, EVEN THOUGH
+                // - this is the final frame
+                // - or more than enough of data was available to make progress
+                return Err(ConnError::InvalidUtf8(
+                    std::str::from_utf8(&buf[..tl + take]).unwrap_err(),
+                ));
+            } else {
+                // not enough data for fully parsing, so we'll just
+                // store the bytes in the tail buffer for the next fragment.
+                // Utf8Chunk::invalid() is always <= 3 bytes
+                tail[..inv.len()].copy_from_slice(inv);
+                *tail_len = inv.len() as u8;
+                return Ok(());
+            }
         } else {
-            return Err(ConnError::InvalidUtf8(
-                std::str::from_utf8(&buf[..tl + take]).unwrap_err(),
-            ));
+            // A valid chunk that couldn't be parsed before was succesfully parsed
+            // → we made progress past the frame boundary!
+            text.push_str(val);
+            *tail_len = 0;
+            val.len() - tl // bytes consumed from data
         }
     };
 
@@ -691,10 +699,12 @@ fn push_text_payload(
         .utf8_chunks()
         .next()
         .expect("utf8_chunks always yields at least one chunk");
-    text.push_str(chunk.valid());
-    let inv = chunk.invalid();
+    let (val, inv) = (chunk.valid(), chunk.invalid());
+    text.push_str(val);
     if !inv.is_empty() {
-        if is_final {
+        if is_final || val.len() + inv.len() < data.len() {
+            // ErrorThe data doesn't span the whole frame
+            // or there is still invalid data even after the final chunk
             return Err(ConnError::InvalidUtf8(
                 std::str::from_utf8(inv).unwrap_err(),
             ));
