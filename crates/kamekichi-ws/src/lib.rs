@@ -251,7 +251,7 @@ impl Buffers {
             }
 
             // Track how many bytes fill_from reads from the OS.
-            let end_before = self.read.as_slice().len();
+            let end_before = self.read.filled().len();
 
             // Parse frame header
             let (fin, opcode, payload_len) = {
@@ -322,7 +322,7 @@ impl Buffers {
 
             // A small read means data trickled in (one frame); a big
             // read (or no read at all) means data was already buffered.
-            let bytes_read = self.read.as_slice().len() - end_before;
+            let bytes_read = self.read.filled().len() - end_before;
             if bytes_read > 0 && bytes_read <= SMALL_READ_THRESHOLD {
                 sess.flood_score = sess.flood_score.saturating_sub(1);
             }
@@ -346,7 +346,7 @@ impl Buffers {
                         return Err(ConnectionError::FragmentedMessageTooLarge(total).into());
                     }
                     self.fragment_buf
-                        .extend_from_slice(&self.read.as_slice()[payload_range]);
+                        .extend_from_slice(&self.read.filled()[payload_range]);
                     if fin {
                         let opcode = sess.fragment_opcode;
                         sess.fragment_opcode = 0;
@@ -363,12 +363,11 @@ impl Buffers {
                     if fin {
                         let relief = 1.max(payload_len / SMALL_READ_THRESHOLD);
                         sess.flood_score = sess.flood_score.saturating_sub(relief);
-                        return into_message(opcode, &self.read.as_slice()[payload_range])
-                            .map(Some);
+                        return into_message(opcode, &self.read.filled()[payload_range]).map(Some);
                     }
                     self.fragment_buf.clear();
                     self.fragment_buf
-                        .extend_from_slice(&self.read.as_slice()[payload_range]);
+                        .extend_from_slice(&self.read.filled()[payload_range]);
                     sess.fragment_opcode = opcode;
                 }
 
@@ -475,9 +474,9 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
             self.bufs
                 .read
                 .read_until::<_, Error>(&mut self.stream, MAX_HEADER, |buf| {
-                    let data = buf.as_slice();
-                    let filled = data.len();
-                    while let Some(off) = data[scan..filled].iter().position(|&b| b == b'\n') {
+                    let data = buf.pending();
+                    let limit = data.len().min(MAX_HEADER);
+                    while let Some(off) = data[scan..limit].iter().position(|&b| b == b'\n') {
                         let nl = scan + off;
                         line_ends.push(nl);
                         if let Some(prev) = prev_nl {
@@ -489,7 +488,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                         prev_nl = Some(nl);
                         scan = nl + 1;
                     }
-                    if filled >= MAX_HEADER {
+                    if data.len() >= MAX_HEADER {
                         return Err(ConnectionError::HeadersTooLarge.into());
                     }
                     Ok(None)
@@ -498,7 +497,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
 
         {
             let status = b"HTTP/1.1 101";
-            let data = self.bufs.read.as_slice();
+            let data = self.bufs.read.pending();
             if !(data[..header_end].starts_with(status)
                 && matches!(data[status.len()], b' ' | b'\r' | b'\n'))
             {
@@ -520,7 +519,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
             let mut has_connection = false;
             let mut subprotocol = None;
             let mut line_start = 0;
-            let data = self.bufs.read.as_slice();
+            let data = self.bufs.read.pending();
             for &nl in &self.bufs.line_ends {
                 let line = &data[line_start..nl];
                 let line = line.strip_suffix(b"\r").unwrap_or(line);

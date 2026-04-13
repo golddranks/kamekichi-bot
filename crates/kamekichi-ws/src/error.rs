@@ -229,8 +229,8 @@ impl Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Reconnect(e) => e.fmt(f),
-            Error::Fatal(e) => e.fmt(f),
+            Error::Reconnect(_) => write!(f, "connection error"),
+            Error::Fatal(_) => write!(f, "caller error"),
         }
     }
 }

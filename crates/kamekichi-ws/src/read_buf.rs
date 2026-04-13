@@ -92,19 +92,19 @@ impl ReadBuf {
         Ok(())
     }
 
-    /// Read from `reader` in a loop, calling `f` after each read.
+    /// Read from `reader` in a loop, calling `f` after each read
+    /// until `f` returns `Ok(Some(value))` or an error occurs.
+    /// `f` may also return `Ok(None)` to request more data.
     ///
-    /// If the buffer already contains data, `f` is called once before
-    /// the first read so that pre-existing data is not overlooked.
+    /// If there is already unprocessed data in the buffer (`start <
+    /// end`), `f` is called once before the first read.
     ///
-    /// `f` receives `&Self` and should return:
-    /// - `Ok(Some(value))` — stop and return the value
-    /// - `Ok(None)` — keep reading
-    /// - `Err(e)` — abort with an error
-    ///
-    /// `max_len` limits the total buffer size; once reached, no further
-    /// reads are attempted and `f` gets a final call to inspect the
-    /// full buffer and decide whether to return a value or an error.
+    /// `max_len` bounds how long the search continues: once at least
+    /// `max_len` bytes of unprocessed data have accumulated and `f`
+    /// hasn't produced a value after the read that crossed the threshold,
+    /// [`FillError::BufferFull`] is returned.  A single read may also buffer
+    /// data beyond `max_len`; that extra data remains available in the buffer for
+    /// later operations.
     pub fn read_until<T, E>(
         &mut self,
         reader: &mut impl Read,
@@ -114,8 +114,9 @@ impl ReadBuf {
     where
         E: From<FillError>,
     {
-        if self.buf.len() < max_len {
-            self.buf.resize(max_len, 0);
+        let limit = self.start + max_len;
+        if self.buf.len() < limit {
+            self.buf.resize(limit, 0);
         }
         // Check pre-existing data before the first (potentially blocking) read.
         if self.end > self.start
@@ -124,9 +125,9 @@ impl ReadBuf {
             return Ok(v);
         }
         loop {
-            if self.end >= self.buf.len() {
-                // Buffer is full — f already saw all data on the previous
-                // iteration.  No room for more reads.
+            if self.end - self.start >= max_len {
+                // Pending data reached the caller's limit — f already
+                // saw all data on the previous iteration.
                 return Err(FillError::BufferFull.into());
             }
             match reader.read(&mut self.buf[self.end..]) {
@@ -148,8 +149,9 @@ impl ReadBuf {
         &self.buf[range]
     }
 
-    /// The valid portion of the backing buffer (`[0..end]`).
-    pub fn as_slice(&self) -> &[u8] {
+    /// All data read into the buffer so far (`[0..end]`), including
+    /// any bytes already advanced past by [`consume`](Self::consume).
+    pub fn filled(&self) -> &[u8] {
         &self.buf[..self.end]
     }
 
