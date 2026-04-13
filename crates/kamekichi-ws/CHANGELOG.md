@@ -34,6 +34,8 @@
   exhaustion (recent — connection alive) from I/O silence (stale —
   consider a ping).
 - **Breaking:** Renamed `SendResult` → `SendStatus`.
+- **Breaking:** `DEFAULT_MAX_PAYLOAD` and `DEFAULT_MAX_BUF_SIZE` are
+  no longer public.  The defaults are documented on the builder methods.
 - `max_payload`, `max_buf_size`, and `frame_budget` now clamp
   out-of-range values instead of panicking.
 

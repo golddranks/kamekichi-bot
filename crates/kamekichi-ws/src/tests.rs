@@ -5,8 +5,11 @@
 use std::io::{self, Cursor};
 
 use super::*;
+use crate::ConnectionError;
 use crate::Rng;
-use read_buf::FillError;
+use crate::read_buf::{FillError, ReadBuf};
+use crate::send_buf::SendBuf;
+use base64::Engine;
 
 struct CounterRng(u32);
 
