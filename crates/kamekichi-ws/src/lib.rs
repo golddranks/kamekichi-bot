@@ -384,6 +384,10 @@ impl Buffers {
                             .map(Some);
                         }
                         OP_PING | OP_PONG | _ => {
+                            // Pong replies are sent even during CloseSent:
+                            // control frames are not data frames, and most
+                            // peers expect pong responses until the TCP
+                            // connection is torn down.
                             if opcode == OP_PING {
                                 if self.send.pending_len() < sess.max_buf_size {
                                     build_frame(
