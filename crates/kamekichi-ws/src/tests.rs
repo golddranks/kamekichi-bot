@@ -89,7 +89,7 @@ fn masked_frame(fin: bool, opcode: u8, payload: &[u8], mask: [u8; 4]) -> Vec<u8>
     }
     buf.extend_from_slice(&mask);
     for (i, &b) in payload.iter().enumerate() {
-        buf.push(b ^ mask[i & 3]);
+        buf.push(b ^ mask[i % 4]);
     }
     buf
 }
@@ -427,7 +427,7 @@ fn parse_client_frame(data: &[u8]) -> (u8, Vec<u8>) {
     let mask: [u8; 4] = data[hdr..hdr + 4].try_into().unwrap();
     let mut payload = data[hdr + 4..hdr + 4 + payload_len].to_vec();
     for (i, b) in payload.iter_mut().enumerate() {
-        *b ^= mask[i & 3];
+        *b ^= mask[i % 4];
     }
     (opcode, payload)
 }
@@ -1847,21 +1847,30 @@ fn flush_stream_flush_timed_out() {
 fn connect_with_subprotocol() {
     let ws = WebSocket::new(CounterRng(0))
         .subprotocols(&["chat", "superchat"])
-        .connect(ConnectMock::auto_with_subprotocol("chat"), "example.com", "/ws")
+        .connect(
+            ConnectMock::auto_with_subprotocol("chat"),
+            "example.com",
+            "/ws",
+        )
         .unwrap();
     assert_eq!(ws.subprotocol(), Some("chat"));
     // Verify the request included the Sec-WebSocket-Protocol header.
     let req = &ws.inner().tx;
-    assert!(req
-        .windows(b"Sec-WebSocket-Protocol: chat, superchat".len())
-        .any(|w| w == b"Sec-WebSocket-Protocol: chat, superchat"));
+    assert!(
+        req.windows(b"Sec-WebSocket-Protocol: chat, superchat".len())
+            .any(|w| w == b"Sec-WebSocket-Protocol: chat, superchat")
+    );
 }
 
 #[test]
 fn connect_subprotocol_not_offered() {
     let result = WebSocket::new(CounterRng(0))
         .subprotocols(&["chat", "superchat"])
-        .connect(ConnectMock::auto_with_subprotocol("nope"), "example.com", "/ws");
+        .connect(
+            ConnectMock::auto_with_subprotocol("nope"),
+            "example.com",
+            "/ws",
+        );
     assert!(matches!(
         result,
         Err(Error::Reconnect(ConnectionError::InvalidSubprotocol))
@@ -1871,8 +1880,11 @@ fn connect_subprotocol_not_offered() {
 #[test]
 fn connect_subprotocol_unrequested() {
     // Client doesn't set subprotocols, but server sends one.
-    let result = WebSocket::new(CounterRng(0))
-        .connect(ConnectMock::auto_with_subprotocol("chat"), "example.com", "/ws");
+    let result = WebSocket::new(CounterRng(0)).connect(
+        ConnectMock::auto_with_subprotocol("chat"),
+        "example.com",
+        "/ws",
+    );
     assert!(matches!(
         result,
         Err(Error::Reconnect(ConnectionError::InvalidSubprotocol))
@@ -1892,9 +1904,10 @@ fn connect_with_headers_success() {
         )
         .unwrap();
     let req = &ws.inner().tx;
-    assert!(req
-        .windows(b"Authorization: Bearer tok".len())
-        .any(|w| w == b"Authorization: Bearer tok"));
+    assert!(
+        req.windows(b"Authorization: Bearer tok".len())
+            .any(|w| w == b"Authorization: Bearer tok")
+    );
 }
 
 #[test]
@@ -2009,8 +2022,7 @@ impl Write for ReadBlocksMock {
 
 #[test]
 fn ping_timeout_on_silence() {
-    let mut ws = WebSocket::new(CounterRng(0))
-        .with_stream(ReadBlocksMock { tx: Vec::new() });
+    let mut ws = WebSocket::new(CounterRng(0)).with_stream(ReadBlocksMock { tx: Vec::new() });
     ws.send_ping(std::time::Instant::now() - std::time::Duration::from_secs(1))
         .unwrap();
     assert!(matches!(
@@ -2063,8 +2075,7 @@ fn last_activity_updated_on_budget_exhaustion() {
 
 #[test]
 fn last_activity_not_updated_on_would_block() {
-    let mut ws = WebSocket::new(CounterRng(0))
-        .with_stream(ReadBlocksMock { tx: Vec::new() });
+    let mut ws = WebSocket::new(CounterRng(0)).with_stream(ReadBlocksMock { tx: Vec::new() });
     assert!(ws.last_activity().is_none());
     assert!(matches!(ws.read_message(), Ok(ReadStatus::Idle)));
     assert!(ws.last_activity().is_none());
@@ -2084,7 +2095,88 @@ fn rng_default_next_u32() {
     }
     // Default next_u32 calls fill_bytes with a 4-byte buffer,
     // then interprets as little-endian.
-    assert_eq!(Rng::next_u32(&mut FillOnly), u32::from_le_bytes([1, 2, 3, 4]));
+    assert_eq!(
+        Rng::next_u32(&mut FillOnly),
+        u32::from_le_bytes([1, 2, 3, 4])
+    );
+}
+
+// ---- Masking alignment ----
+
+#[test]
+fn apply_mask_unaligned() {
+    // Allocate a 32-byte aligned buffer, then offset by 1–3 bytes
+    // to force the head-splitting path in apply_mask.
+    let mask = [0xAA, 0xBB, 0xCC, 0xDD];
+    for misalign in 1..=3 {
+        let mut backing = vec![0u8; 64 + misalign];
+        let buf = &mut backing[misalign..misalign + 48];
+
+        // Fill with a known pattern.
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let expected: Vec<u8> = (0..48u8).map(|i| i ^ mask[i as usize % 4]).collect();
+
+        super::apply_mask(buf, mask);
+        assert_eq!(buf, expected.as_slice(), "misalign={misalign}");
+    }
+}
+
+// ---- Masking benchmark (not a real benchmark, just a comparison) ----
+
+#[inline(never)]
+fn apply_mask_naive(buf: &mut [u8], mask: [u8; 4]) {
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b ^= mask[i % 4];
+    }
+}
+
+#[inline(never)]
+fn apply_mask_wide(buf: &mut [u8], mask: [u8; 4]) {
+    super::apply_mask(buf, mask);
+}
+
+#[test]
+fn mask_benchmark() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let mask = [0xAA, 0xBB, 0xCC, 0xDD];
+    #[cfg(debug_assertions)]
+    let iterations = 500;
+    #[cfg(not(debug_assertions))]
+    let iterations = 10000;
+
+    eprintln!("iterations: {iterations}");
+
+    for &size in &[15, 16, 17, 32, 64, 1024, 16 * 1024, 256 * 1024] {
+        let data: Vec<u8> = (0..size).map(|i| i as u8).collect();
+
+        let mut buf = data.clone();
+        let start = Instant::now();
+        for _ in 0..iterations {
+            apply_mask_naive(black_box(&mut buf), black_box(mask));
+        }
+        let naive = start.elapsed();
+
+        let mut buf = data.clone();
+        let start = Instant::now();
+        for _ in 0..iterations {
+            apply_mask_wide(black_box(&mut buf), black_box(mask));
+        }
+        let wide = start.elapsed();
+
+        let speedup = naive.as_nanos() as f64 / wide.as_nanos() as f64;
+        eprintln!("{size:>8} bytes: naive {naive:>10.2?}  wide {wide:>10.2?}  ({speedup:.1}x)");
+
+        if size == 256 * 1024 {
+            assert!(
+                speedup >= 10.0,
+                "wide masking should be at least 10x faster at 256KB, got {speedup:.1}x"
+            );
+        }
+    }
 }
 
 // ---- Send + Sync static assertions ----

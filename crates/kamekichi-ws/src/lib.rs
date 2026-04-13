@@ -767,7 +767,6 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
 
 /// Append a masked WebSocket frame to the send buffer.
 fn build_frame(send: &mut SendBuf, rng: &mut impl Rng, opcode: u8, payload: &[u8]) {
-    let mask = rng.next_u32().to_ne_bytes();
     send.reserve(2 + 8 + 4 + payload.len());
     send.push_byte(FIN | opcode);
 
@@ -781,12 +780,41 @@ fn build_frame(send: &mut SendBuf, rng: &mut impl Rng, opcode: u8, payload: &[u8
         send.push_byte(MASK_BIT | 127);
         send.push(&(len as u64).to_be_bytes());
     }
+    let mask = rng.next_u32().to_ne_bytes();
     send.push(&mask);
     send.push(payload);
 
-    let buf = send.last_mut(payload.len());
-    for (i, b) in buf.iter_mut().enumerate() {
-        *b ^= mask[i & 3]; // TODO: mask 4 bytes at atime
+    apply_mask(send.last_mut(payload.len()), mask);
+}
+
+/// XOR `buf` with `mask` repeated.  Aligns to a 16-byte boundary,
+/// then uses u128-wide XOR for the bulk.
+fn apply_mask(buf: &mut [u8], mask: [u8; 4]) {
+    // Split off unaligned head bytes.
+    let align = buf.as_ptr().align_offset(align_of::<u128>()).min(buf.len());
+    let (head, rest) = buf.split_at_mut(align);
+    for (i, b) in head.iter_mut().enumerate() {
+        *b ^= mask[i % 4];
+    }
+
+    // Build the wide mask, rotated by the head length so mask bytes
+    // stay in sync across the split.
+    let rot = (align % 4) as u32 * 8;
+    let m = u32::from_ne_bytes(mask);
+    #[cfg(target_endian = "little")]
+    let rotated = m.rotate_right(rot);
+    #[cfg(target_endian = "big")]
+    let rotated = m.rotate_left(rot);
+    let r = rotated as u128;
+    let mask128 = r | (r << 32) | (r << 64) | (r << 96);
+
+    let (chunks, tail) = rest.as_chunks_mut::<16>();
+    for chunk in chunks {
+        *chunk = (u128::from_ne_bytes(*chunk) ^ mask128).to_ne_bytes();
+    }
+    let rotated_bytes = rotated.to_ne_bytes();
+    for (i, b) in tail.iter_mut().enumerate() {
+        *b ^= rotated_bytes[i % 4];
     }
 }
 
