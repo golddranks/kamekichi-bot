@@ -7,5 +7,5 @@ license = "MIT / Apache-2.0"
 repository = "https://github.com/golddranks/kamekichi-bot"
 
 [dependencies]
-kamekichi = "0.0.1"
+kamekichi = { workspace = true }
 serde = { version = "1", features = ["derive"] }

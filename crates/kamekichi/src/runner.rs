@@ -219,7 +219,11 @@ fn run_session(
     resume_data: &mut Option<kamekichi_discord::SessData>,
     tracker: &mut ChannelRoleTracker,
 ) -> Result<(), SessionExit> {
-    discord.connect(config.platform.intent_bits(), resume_data.take())?;
+    if let Some(data) = resume_data.take() {
+        discord.resume(data)?;
+    } else {
+        discord.connect(config.platform.intent_bits())?;
+    }
     if !discord.guild_ids()?.contains(&config.platform.guild_id) {
         return Err(SessionExit::Fatal(
             format!(
@@ -362,7 +366,7 @@ fn run_session(
 }
 
 fn execute_actions(
-    discord: &kamekichi_discord::Client,
+    discord: &mut kamekichi_discord::Client,
     registry: &mut RefRegistry,
     state: &mut State,
     actions: Vec<Action>,

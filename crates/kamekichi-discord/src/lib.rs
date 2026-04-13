@@ -13,10 +13,11 @@ mod message;
 
 pub use gateway::{PollError, SessData};
 
-use error::{Error, Result, StdResult};
+pub use error::Error;
+use error::{Result, StdResult};
 use gateway::{ConnectData, Session, SessionState};
 use http_api::HttpApi;
-use message::Event;
+pub use message::{Channel, Event, Role};
 
 /// Discord bot client managing a gateway session and HTTP requests.
 pub struct Client {

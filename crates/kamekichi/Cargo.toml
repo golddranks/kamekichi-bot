@@ -7,7 +7,7 @@ license = "MIT / Apache-2.0"
 repository = "https://github.com/golddranks/kamekichi-bot"
 
 [dependencies]
-kamekichi-discord = "0.0.1"
+kamekichi-discord = { workspace = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 ring = "0.17.14"
