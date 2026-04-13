@@ -965,7 +965,7 @@ impl<R: Rng> WebSocket<(), R> {
         path: &str,
         headers: &[(&str, &str)],
     ) -> Result<WebSocket<S, R>, (Error, Self, S)> {
-        if host.bytes().any(|b| b.is_ascii_control())
+        if host.bytes().any(|b| b.is_ascii_control() || b == b' ')
             || path.bytes().any(|b| b.is_ascii_control() || b == b' ')
             || headers.iter().any(|&(n, v)| {
                 n.bytes().any(|b| b.is_ascii_control() || b == b' ' || b == b':')

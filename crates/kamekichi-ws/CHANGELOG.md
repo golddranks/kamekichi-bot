@@ -17,7 +17,8 @@
 ### Changed
 
 - Stricter input validation: all header fields reject control characters;
-  paths also reject spaces; header names also reject spaces and colons.
+  hosts and paths also reject spaces; header names also reject spaces
+  and colons.
 - Frame masking uses aligned u128-wide XOR (~25x faster for large payloads).
 - **Breaking:** Flood detection and frame budget now apply to all frame
   types, not just control frames.  This closes a denial-of-service vector
