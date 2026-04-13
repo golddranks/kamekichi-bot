@@ -60,7 +60,6 @@ const MAX_HEADER: usize = 8192;
 /// divisor for message-completion flood relief.
 const SMALL_READ_THRESHOLD: usize = 127;
 
-
 // Frame header bits (RFC 6455 §5.2)
 const FIN: u8 = 0b1000_0000;
 const RESERVED_MASK: u8 = 0b0111_0000;
@@ -207,7 +206,7 @@ impl Buffers {
         stream: &mut S,
         sess: &mut Session,
         rng: &mut R,
-    ) -> Result<Option<Message<'_>>, Error> {
+    ) -> Result<Option<Message<'_>>, ConnectionError> {
         // If a previous send (e.g. a pong reply) was only partially
         // written to the stream, finish sending it now.
         if self.send.has_pending() {
@@ -222,7 +221,7 @@ impl Buffers {
                 // stay in the send buffer and will go out on the next attempt
                 // on a best-effort basis.
                 Err(e) if e.is_would_block() => {}
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
             }
         }
         let mut budget = sess.frame_budget;
@@ -255,14 +254,14 @@ impl Buffers {
 
                 let rsv = byte0 & RESERVED_MASK;
                 if rsv != 0 {
-                    return Err(ConnectionError::BadReservedBits(rsv).into());
+                    return Err(ConnectionError::BadReservedBits(rsv));
                 }
 
                 let fin = byte0 & FIN != 0;
                 let opcode = byte0 & OPCODE_MASK;
                 let masked = byte1 & MASK_BIT != 0;
                 if masked {
-                    return Err(ConnectionError::MaskedServerFrame.into());
+                    return Err(ConnectionError::MaskedServerFrame);
                 }
                 let len_byte = (byte1 & LEN_MASK) as usize;
 
@@ -273,11 +272,16 @@ impl Buffers {
                         let hdr = self.read.pending();
                         let len = u16::from_be_bytes([hdr[2], hdr[3]]) as usize;
                         if len < 126 {
-                            return Err(ConnectionError::NonMinimalLength.into());
+                            return Err(ConnectionError::NonMinimalLength);
                         }
                         if len > sess.max_payload {
                             return Err(
-                                ConnectionError::PayloadTooLarge(len as u64).into()
+                                ConnectionError::PayloadTooLarge(len as u64)
+                            );
+                        }
+                        if len > sess.max_payload {
+                            return Err(
+                                ConnectionError::PayloadTooLarge(len as u64)
                             );
                         }
                         (4, len)
@@ -287,13 +291,13 @@ impl Buffers {
                         let hdr = self.read.pending();
                         let len = u64::from_be_bytes(hdr[2..10].try_into().unwrap());
                         if len >> 63 != 0 {
-                            return Err(ConnectionError::PayloadLengthMsb.into());
+                            return Err(ConnectionError::PayloadLengthMsb);
                         }
                         if len < 65536 {
-                            return Err(ConnectionError::NonMinimalLength.into());
+                            return Err(ConnectionError::NonMinimalLength);
                         }
                         if len > sess.max_payload as u64 {
-                            return Err(ConnectionError::PayloadTooLarge(len).into());
+                            return Err(ConnectionError::PayloadTooLarge(len));
                         }
                         (10, len as usize)
                     }
@@ -302,10 +306,10 @@ impl Buffers {
 
                 if opcode >= OP_CLOSE {
                     if !fin {
-                        return Err(ConnectionError::FragmentedControl.into());
+                        return Err(ConnectionError::FragmentedControl);
                     }
                     if payload_len > 125 {
-                        return Err(ConnectionError::ControlPayloadTooLarge(payload_len).into());
+                        return Err(ConnectionError::ControlPayloadTooLarge(payload_len));
                     }
                 }
 
@@ -326,7 +330,7 @@ impl Buffers {
             // Flood detection: every frame adds pressure.
             sess.flood_score += 1;
             if sess.flood_score > sess.max_flood_score {
-                return Err(ConnectionError::Flood.into());
+                return Err(ConnectionError::Flood);
             }
 
             let pos = self.read.pos();
@@ -335,11 +339,11 @@ impl Buffers {
             match opcode {
                 OP_CONTINUATION => {
                     if sess.fragment_opcode == 0 {
-                        return Err(ConnectionError::UnexpectedContinuation.into());
+                        return Err(ConnectionError::UnexpectedContinuation);
                     }
                     let total = self.fragment_buf.len() + payload_len;
                     if total > sess.max_payload {
-                        return Err(ConnectionError::FragmentedMessageTooLarge(total).into());
+                        return Err(ConnectionError::FragmentedMessageTooLarge(total));
                     }
                     self.fragment_buf
                         .extend_from_slice(&self.read.filled()[payload_range]);
@@ -354,7 +358,7 @@ impl Buffers {
 
                 OP_TEXT | OP_BINARY => {
                     if sess.fragment_opcode != 0 {
-                        return Err(ConnectionError::DataDuringFragmentation.into());
+                        return Err(ConnectionError::DataDuringFragmentation);
                     }
                     if fin {
                         let relief = 1.max(payload_len / SMALL_READ_THRESHOLD);
@@ -367,8 +371,7 @@ impl Buffers {
                     sess.fragment_opcode = opcode;
                 }
 
-                OP_CLOSE | OP_PING | OP_PONG =>
-                {
+                OP_CLOSE | OP_PING | OP_PONG => {
                     #[allow(clippy::wildcard_in_or_patterns)]
                     match opcode {
                         OP_CLOSE => {
@@ -403,7 +406,7 @@ impl Buffers {
                     }
                 }
 
-                _ => return Err(ConnectionError::UnknownOpcode(opcode).into()),
+                _ => return Err(ConnectionError::UnknownOpcode(opcode)),
             }
 
             // Budget: yield to the caller after processing too many
@@ -418,7 +421,7 @@ impl Buffers {
 
 impl<S: Read + Write, R: Rng> WebSocket<S, R> {
     /// Run the WebSocket opening handshake on the underlying stream.
-    fn handshake(&mut self, host: &str, path: &str, headers: &[(&str, &str)]) -> Result<(), Error> {
+    fn handshake(&mut self, host: &str, path: &str, headers: &[(&str, &str)]) -> Result<(), ConnectionError> {
         self.bufs.read.clear();
         self.bufs.send.clear();
         self.bufs.line_ends.clear();
@@ -473,7 +476,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
             let line_ends = &mut self.bufs.line_ends;
             self.bufs
                 .read
-                .read_until::<_, Error>(&mut self.stream, MAX_HEADER, |buf| {
+                .read_until::<_, ConnectionError>(&mut self.stream, MAX_HEADER, |buf| {
                     let data = buf.pending();
                     let limit = data.len().min(MAX_HEADER);
                     while let Some(off) = data[scan..limit].iter().position(|&b| b == b'\n') {
@@ -489,7 +492,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                         scan = nl + 1;
                     }
                     if data.len() >= MAX_HEADER {
-                        return Err(ConnectionError::HeadersTooLarge.into());
+                        return Err(ConnectionError::HeadersTooLarge);
                     }
                     Ok(None)
                 })?
@@ -501,7 +504,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
             if !(data[..header_end].starts_with(status)
                 && matches!(data[status.len()], b' ' | b'\r' | b'\n'))
             {
-                return Err(ConnectionError::BadStatus.into());
+                return Err(ConnectionError::BadStatus);
             }
         }
 
@@ -545,13 +548,13 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
 
             let accept = accept.ok_or(ConnectionError::MissingAccept)?;
             if accept != expected {
-                return Err(ConnectionError::BadAccept.into());
+                return Err(ConnectionError::BadAccept);
             }
             if !has_upgrade {
-                return Err(ConnectionError::MissingUpgrade.into());
+                return Err(ConnectionError::MissingUpgrade);
             }
             if !has_connection {
-                return Err(ConnectionError::MissingConnection.into());
+                return Err(ConnectionError::MissingConnection);
             }
 
             // RFC 6455 §4.2.2: if the server sends Sec-WebSocket-Protocol,
@@ -561,11 +564,11 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                 match self.sess.subprotocols {
                     Some(ref offered) => {
                         if !offered.split(',').any(|t| t.trim() == selected) {
-                            return Err(ConnectionError::InvalidSubprotocol.into());
+                            return Err(ConnectionError::InvalidSubprotocol);
                         }
                         self.sess.negotiated_subprotocol = Some(selected.to_owned());
                     }
-                    None => return Err(ConnectionError::InvalidSubprotocol.into()),
+                    None => return Err(ConnectionError::InvalidSubprotocol),
                 }
             }
         }
@@ -626,7 +629,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
             }
             Err(e) => {
                 self.sess.close_state = CloseState::Closed;
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -832,7 +835,7 @@ fn validate_recv_close_code(code: u16) -> Result<(), ConnectionError> {
     }
 }
 
-fn into_message<'a>(opcode: u8, buf: &'a [u8]) -> Result<Message<'a>, Error> {
+fn into_message<'a>(opcode: u8, buf: &'a [u8]) -> Result<Message<'a>, ConnectionError> {
     match opcode {
         OP_TEXT => Ok(Message::Text(std::str::from_utf8(buf)?)),
         OP_BINARY => Ok(Message::Binary(buf)),
@@ -847,9 +850,9 @@ fn handle_close<'a>(
     rng: &mut impl Rng,
     payload: &'a [u8],
     echo: bool,
-) -> Result<Message<'a>, Error> {
+) -> Result<Message<'a>, ConnectionError> {
     if payload.len() == 1 {
-        return Err(ConnectionError::BadClosePayload.into());
+        return Err(ConnectionError::BadClosePayload);
     }
     let (code, reason) = if payload.len() >= 2 {
         let code = u16::from_be_bytes([payload[0], payload[1]]);
@@ -975,7 +978,8 @@ impl<R: Rng> WebSocket<(), R> {
         if host.bytes().any(|b| b.is_ascii_control() || b == b' ')
             || path.bytes().any(|b| b.is_ascii_control() || b == b' ')
             || headers.iter().any(|&(n, v)| {
-                n.bytes().any(|b| b.is_ascii_control() || b == b' ' || b == b':')
+                n.bytes()
+                    .any(|b| b.is_ascii_control() || b == b' ' || b == b':')
                     || v.bytes().any(|b| b.is_ascii_control())
             })
         {
@@ -984,7 +988,7 @@ impl<R: Rng> WebSocket<(), R> {
         let mut ws = self.with_stream(stream);
         if let Err(e) = ws.handshake(host, path, headers) {
             let (ws, stream) = ws.disconnect();
-            return Err((e, ws, stream));
+            return Err((e.into(), ws, stream));
         }
         Ok(ws)
     }

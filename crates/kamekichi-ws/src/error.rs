@@ -219,13 +219,6 @@ impl From<Utf8Error> for Error {
         Error::Reconnect(ConnectionError::InvalidUtf8(e))
     }
 }
-
-impl Error {
-    pub(crate) fn is_would_block(&self) -> bool {
-        matches!(self, Error::Reconnect(e) if e.is_would_block())
-    }
-}
-
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
