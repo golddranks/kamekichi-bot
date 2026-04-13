@@ -7,13 +7,29 @@ const MIN_READ_BUF: usize = 4096;
 
 /// Error from [`ReadBuf::fill_from`].
 #[derive(Debug)]
-pub(crate) enum FillError {
+pub(crate) enum ReadUntilError<E> {
     /// The stream reached EOF before enough data was available.
     Eof,
     /// An IO error occurred while reading.
     Io(io::Error),
     /// The buffer reached its size limit before the callback produced a value.
     BufferFull,
+    UserError(E),
+}
+
+/// Error from [`ReadBuf::fill_from`].
+#[derive(Debug)]
+pub(crate) enum FillFromError {
+    /// The stream reached EOF before enough data was available.
+    Eof,
+    /// An IO error occurred while reading.
+    Io(io::Error),
+}
+
+impl<E> From<E> for ReadUntilError<E> {
+    fn from(e: E) -> Self {
+        ReadUntilError::UserError(e)
+    }
 }
 
 /// A byte buffer with separate read and write cursors.
@@ -72,7 +88,7 @@ impl ReadBuf {
     ///
     /// May read more than `need` bytes if the OS provides them — the extra
     /// data stays buffered for subsequent calls.
-    pub fn fill_from(&mut self, reader: &mut impl Read, need: usize) -> Result<(), FillError> {
+    pub fn fill_from(&mut self, reader: &mut impl Read, need: usize) -> Result<(), FillFromError> {
         let target = self.start + need;
         if self.end >= target {
             return Ok(());
@@ -83,10 +99,10 @@ impl ReadBuf {
         }
         while self.end < target {
             match reader.read(&mut self.buf[self.end..]) {
-                Ok(0) => return Err(FillError::Eof),
+                Ok(0) => return Err(FillFromError::Eof),
                 Ok(n) => self.end += n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(FillError::Io(e)),
+                Err(e) => return Err(FillFromError::Io(e)),
             }
         }
         Ok(())
@@ -110,10 +126,7 @@ impl ReadBuf {
         reader: &mut impl Read,
         max_len: usize,
         mut f: impl FnMut(&Self) -> Result<Option<T>, E>,
-    ) -> Result<T, E>
-    where
-        E: From<FillError>,
-    {
+    ) -> Result<T, ReadUntilError<E>> {
         let limit = self.start + max_len;
         if self.buf.len() < limit {
             self.buf.resize(limit, 0);
@@ -128,13 +141,13 @@ impl ReadBuf {
             if self.end - self.start >= max_len {
                 // Pending data reached the caller's limit — f already
                 // saw all data on the previous iteration.
-                return Err(FillError::BufferFull.into());
+                return Err(ReadUntilError::BufferFull);
             }
             match reader.read(&mut self.buf[self.end..]) {
-                Ok(0) => return Err(FillError::Eof.into()),
+                Ok(0) => return Err(ReadUntilError::Eof),
                 Ok(n) => self.end += n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(FillError::Io(e).into()),
+                Err(e) => return Err(ReadUntilError::Io(e)),
             }
             if let Some(v) = f(self)? {
                 return Ok(v);

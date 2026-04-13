@@ -1,7 +1,10 @@
+use std::error::Error as StdError;
+use std::fmt::Display;
 use std::io;
 use std::str::Utf8Error;
 
-use crate::read_buf::FillError;
+use crate::read_buf::FillFromError;
+use crate::send_buf::FlushError;
 
 /// Actionable error from a WebSocket operation.
 #[derive(Debug)]
@@ -76,13 +79,15 @@ pub enum ConnectionError {
 pub enum CallerError {
     /// The connection is closing; no further operations are allowed.
     Closing,
-    /// `host` or `path` passed to [`connect`](WebSocket::connect) contains CR or LF.
+    /// A header name, value, host, or path contains a disallowed character.
     InvalidHeaderValue,
     /// Close code is not valid for sending (RFC 6455 §7.4).
     InvalidCloseCode(u16),
     /// Close reason exceeds 123 bytes.
     CloseReasonTooLong(usize),
 }
+
+// --- ConnectionError impls ---
 
 impl ConnectionError {
     pub(crate) fn is_would_block(&self) -> bool {
@@ -93,7 +98,7 @@ impl ConnectionError {
     }
 }
 
-impl std::fmt::Display for ConnectionError {
+impl Display for ConnectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConnectionError::Io(e) => write!(f, "IO: {e}"),
@@ -143,12 +148,30 @@ impl std::fmt::Display for ConnectionError {
     }
 }
 
-impl std::error::Error for ConnectionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl StdError for ConnectionError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             ConnectionError::Io(e) => Some(e),
             ConnectionError::InvalidUtf8(e) => Some(e),
             _ => None,
+        }
+    }
+}
+
+impl From<FlushError> for ConnectionError {
+    fn from(e: FlushError) -> Self {
+        match e {
+            FlushError::WriteClosed => ConnectionError::Closed,
+            FlushError::Io(e) => ConnectionError::Io(e),
+        }
+    }
+}
+
+impl From<FillFromError> for ConnectionError {
+    fn from(e: FillFromError) -> Self {
+        match e {
+            FillFromError::Eof => ConnectionError::Closed,
+            FillFromError::Io(e) => ConnectionError::Io(e),
         }
     }
 }
@@ -165,17 +188,9 @@ impl From<Utf8Error> for ConnectionError {
     }
 }
 
-impl From<FillError> for ConnectionError {
-    fn from(e: FillError) -> Self {
-        match e {
-            FillError::Eof => ConnectionError::Closed,
-            FillError::BufferFull => ConnectionError::HeadersTooLarge,
-            FillError::Io(e) => e.into(),
-        }
-    }
-}
+// --- CallerError impls ---
 
-impl std::fmt::Display for CallerError {
+impl Display for CallerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CallerError::Closing => write!(f, "connection is closing"),
@@ -188,7 +203,33 @@ impl std::fmt::Display for CallerError {
     }
 }
 
-impl std::error::Error for CallerError {}
+impl StdError for CallerError {}
+
+// --- Error impls ---
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Reconnect(_) => write!(f, "connection error"),
+            Error::Fatal(_) => write!(f, "caller error"),
+        }
+    }
+}
+
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Error::Reconnect(e) => Some(e),
+            Error::Fatal(e) => Some(e),
+        }
+    }
+}
+
+impl From<FlushError> for Error {
+    fn from(e: FlushError) -> Self {
+        Error::Reconnect(e.into())
+    }
+}
 
 impl From<ConnectionError> for Error {
     fn from(e: ConnectionError) -> Self {
@@ -199,40 +240,5 @@ impl From<ConnectionError> for Error {
 impl From<CallerError> for Error {
     fn from(e: CallerError) -> Self {
         Error::Fatal(e)
-    }
-}
-
-impl From<FillError> for Error {
-    fn from(e: FillError) -> Self {
-        Error::Reconnect(e.into())
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(e: io::Error) -> Self {
-        Error::Reconnect(ConnectionError::Io(e))
-    }
-}
-
-impl From<Utf8Error> for Error {
-    fn from(e: Utf8Error) -> Self {
-        Error::Reconnect(ConnectionError::InvalidUtf8(e))
-    }
-}
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Reconnect(_) => write!(f, "connection error"),
-            Error::Fatal(_) => write!(f, "caller error"),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Reconnect(e) => Some(e),
-            Error::Fatal(e) => Some(e),
-        }
     }
 }

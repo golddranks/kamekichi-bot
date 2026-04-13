@@ -1,7 +1,24 @@
 use std::io::{self, Write};
 
-use crate::ConnectionError;
 use crate::rng::Rng;
+
+/// Error from [`SendBuf::flush`].
+#[derive(Debug)]
+pub(crate) enum FlushError {
+    /// `write()` returned `Ok(0)`, indicating a closed stream.
+    WriteClosed,
+    /// An IO error occurred while writing.
+    Io(io::Error),
+}
+
+impl FlushError {
+    pub fn is_would_block(&self) -> bool {
+        matches!(
+            self,
+            FlushError::Io(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+        )
+    }
+}
 
 /// Outgoing byte buffer with a drain cursor.
 ///
@@ -56,13 +73,13 @@ impl SendBuf {
 
     /// Drain pending data to `stream`.  Retries on `Interrupted`;
     /// propagates all other errors.
-    pub fn flush(&mut self, stream: &mut impl Write) -> Result<(), ConnectionError> {
+    pub fn flush(&mut self, stream: &mut impl Write) -> Result<(), FlushError> {
         while self.pos < self.buf.len() {
             match stream.write(&self.buf[self.pos..]) {
-                Ok(0) => return Err(ConnectionError::Closed),
+                Ok(0) => return Err(FlushError::WriteClosed),
                 Ok(n) => self.pos += n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(FlushError::Io(e)),
             }
         }
         Ok(())

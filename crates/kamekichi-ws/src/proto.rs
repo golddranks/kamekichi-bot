@@ -4,7 +4,7 @@ use std::time::Instant;
 use base64::Engine;
 
 use crate::error::{CallerError, ConnectionError as ConnError};
-use crate::read_buf::ReadBuf;
+use crate::read_buf::{ReadBuf, ReadUntilError};
 use crate::rng::Rng;
 use crate::send_buf::SendBuf;
 use crate::{Message, WebSocket};
@@ -134,7 +134,7 @@ impl Buffers {
                 // stay in the send buffer and will go out on the next attempt
                 // on a best-effort basis.
                 Err(e) if e.is_would_block() => {}
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             }
         }
         let mut budget = sess.frame_budget;
@@ -426,6 +426,12 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                         return Err(ConnError::HeadersTooLarge);
                     }
                     Ok(None)
+                })
+                .map_err(|e| match e {
+                    ReadUntilError::Eof => ConnError::Closed,
+                    ReadUntilError::Io(e) => ConnError::Io(e),
+                    ReadUntilError::BufferFull => ConnError::HeadersTooLarge,
+                    ReadUntilError::UserError(e) => e,
                 })?
         };
 

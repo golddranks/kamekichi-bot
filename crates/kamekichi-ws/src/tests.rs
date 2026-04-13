@@ -7,7 +7,7 @@ use std::io::{self, Cursor};
 use super::*;
 use crate::ConnectionError as ConnError;
 use crate::Rng;
-use crate::read_buf::{FillError, ReadBuf};
+use crate::read_buf::{ReadBuf, ReadUntilError};
 use crate::send_buf::SendBuf;
 use base64::Engine;
 
@@ -1185,13 +1185,11 @@ fn error_display_and_source() {
 fn from_impls() {
     // From<Utf8Error> for ConnError
     let _: ConnError = make_utf8_error().into();
-    // From<FillError::BufferFull> for ConnError
-    let e: ConnError = FillError::BufferFull.into();
-    assert!(matches!(e, ConnError::HeadersTooLarge));
-    // From<io::Error> for Error
-    let _: Error = io::Error::other("t").into();
-    // From<Utf8Error> for Error
-    let _: Error = make_utf8_error().into();
+    // From<FillFromError> for ConnError
+    let e: ConnError = crate::read_buf::FillFromError::Eof.into();
+    assert!(matches!(e, ConnError::Closed));
+    // From<FlushError> for Error
+    let _: Error = crate::send_buf::FlushError::WriteClosed.into();
 }
 
 // ---- read_message after close ----
@@ -1714,7 +1712,10 @@ fn send_buf_flush_write_zero() {
     let mut send = SendBuf::with_capacity(16);
     send.push(b"hello");
     let mut stream = WriteZeroMock;
-    assert!(matches!(send.flush(&mut stream), Err(ConnError::Closed)));
+    assert!(matches!(
+        send.flush(&mut stream),
+        Err(crate::send_buf::FlushError::WriteClosed)
+    ));
 }
 
 // ---- read_buf::read_until coverage ----
@@ -1729,7 +1730,7 @@ fn read_until_pre_existing_data() {
     // read_until sees pre-existing data (end > start) and the callback
     // returns immediately.
     let result = buf
-        .read_until::<_, FillError>(&mut Cursor::new(Vec::new()), 64, |b| {
+        .read_until::<_, ReadUntilError<()>>(&mut Cursor::new(Vec::new()), 64, |b| {
             if b.pending().len() >= 3 {
                 Ok(Some(b.pending().len()))
             } else {
@@ -1744,12 +1745,12 @@ fn read_until_pre_existing_data() {
 fn read_until_buffer_full() {
     let mut buf = ReadBuf::with_capacity(16);
     let data = vec![b'x'; 100];
-    let result = buf.read_until::<(), FillError>(
+    let result = buf.read_until::<(), ReadUntilError<()>>(
         &mut Cursor::new(data),
         16,
         |_| Ok(None), // never accept
     );
-    assert!(matches!(result, Err(FillError::BufferFull)));
+    assert!(matches!(result, Err(ReadUntilError::BufferFull)));
 }
 
 #[test]
@@ -1759,7 +1760,7 @@ fn read_until_interrupted() {
         inner: Cursor::new(b"hello".to_vec()),
         interrupt: true,
     };
-    buf.read_until::<_, FillError>(&mut reader, 64, |b| {
+    buf.read_until::<_, ReadUntilError<()>>(&mut reader, 64, |b| {
         if b.pending().len() >= 5 {
             Ok(Some(()))
         } else {
@@ -1778,8 +1779,8 @@ fn read_until_io_error() {
             Err(io::Error::new(io::ErrorKind::ConnectionReset, "reset"))
         }
     }
-    let result = buf.read_until::<(), FillError>(&mut ErrorReader, 64, |_| Ok(None));
-    assert!(matches!(result, Err(FillError::Io(_))));
+    let result = buf.read_until::<(), ReadUntilError<()>>(&mut ErrorReader, 64, |_| Ok(None));
+    assert!(matches!(result, Err(ReadUntilError::Io(_))));
 }
 
 // ---- Pending send hard error during read_message ----
