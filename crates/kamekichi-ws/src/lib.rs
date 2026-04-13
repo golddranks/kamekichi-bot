@@ -275,6 +275,11 @@ impl Buffers {
                         if len < 126 {
                             return Err(ConnectionError::NonMinimalLength.into());
                         }
+                        if len > sess.max_payload {
+                            return Err(
+                                ConnectionError::PayloadTooLarge(len as u64).into()
+                            );
+                        }
                         (4, len)
                     }
                     127 => {
@@ -302,8 +307,6 @@ impl Buffers {
                     if payload_len > 125 {
                         return Err(ConnectionError::ControlPayloadTooLarge(payload_len).into());
                     }
-                } else if payload_len > sess.max_payload {
-                    return Err(ConnectionError::PayloadTooLarge(payload_len as u64).into());
                 }
 
                 let frame_size = header_size + payload_len;
