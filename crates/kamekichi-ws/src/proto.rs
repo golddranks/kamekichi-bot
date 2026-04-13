@@ -107,6 +107,13 @@ impl Buffers {
         }
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.read.clear();
+        self.send.clear();
+        self.line_ends.clear();
+        self.fragment_buf.clear();
+    }
+
     pub(crate) fn read_message<S: Read + Write, R: Rng>(
         &mut self,
         stream: &mut S,
@@ -334,6 +341,16 @@ impl Session {
             last_activity: None,
         }
     }
+
+    /// Reset runtime state for a new connection, preserving configuration.
+    pub(crate) fn reset(&mut self) {
+        self.fragment_opcode = 0;
+        self.close_state = CloseState::Open;
+        self.flood_score = 0;
+        self.negotiated_subprotocol = None;
+        self.ping_deadline = None;
+        self.last_activity = None;
+    }
 }
 
 impl<S: Read + Write, R: Rng> WebSocket<S, R> {
@@ -344,16 +361,8 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         path: &str,
         headers: &[(&str, &str)],
     ) -> Result<(), ConnError> {
-        self.bufs.read.clear();
-        self.bufs.send.clear();
-        self.bufs.line_ends.clear();
-        self.bufs.fragment_buf.clear();
-        self.sess.fragment_opcode = 0;
-        self.sess.close_state = CloseState::Open;
-        self.sess.flood_score = 0;
-        self.sess.negotiated_subprotocol = None;
-        self.sess.ping_deadline = None;
-        self.sess.last_activity = None;
+        self.bufs.clear();
+        self.sess.reset();
 
         let key = {
             let mut raw = [0u8; 16];
@@ -557,11 +566,22 @@ pub(crate) fn apply_mask(buf: &mut [u8], mask: [u8; 4]) {
     }
 }
 
-pub(crate) fn validate_send_close_code(code: u16) -> Result<(), CallerError> {
+/// Validate close code and build the close frame payload (code + reason).
+/// Returns the filled length within the 125-byte buffer.
+pub(crate) fn close_payload(code: u16, reason: &str) -> Result<([u8; 125], usize), CallerError> {
     match code {
-        1000..=1003 | 1007..=1014 | 3000..=4999 => Ok(()),
-        _ => Err(CallerError::InvalidCloseCode(code)),
+        1000..=1003 | 1007..=1014 | 3000..=4999 => {}
+        _ => return Err(CallerError::InvalidCloseCode(code)),
     }
+    let reason = reason.as_bytes();
+    if reason.len() > 123 {
+        return Err(CallerError::CloseReasonTooLong(reason.len()));
+    }
+    let len = 2 + reason.len();
+    let mut buf = [0u8; 125];
+    buf[..2].copy_from_slice(&code.to_be_bytes());
+    buf[2..len].copy_from_slice(reason);
+    Ok((buf, len))
 }
 
 fn validate_recv_close_code(code: u16) -> Result<(), ConnError> {

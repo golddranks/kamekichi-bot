@@ -187,6 +187,9 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         match self.bufs.send.flush(&mut self.stream) {
             Ok(()) => {
                 let _ = self.stream.flush();
+                self.bufs
+                    .send
+                    .maybe_shrink(self.sess.max_buf_size, &mut self.rng);
                 Ok(SendStatus::Done)
             }
             Err(e) if e.is_would_block() => Ok(SendStatus::Queued),
@@ -226,24 +229,12 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
 
     /// Send a UTF-8 text frame.
     pub fn send_text(&mut self, text: &str) -> Result<SendStatus, Error> {
-        let r = self.send_frame(OP_TEXT, text.as_bytes())?;
-        if r == SendStatus::Done {
-            self.bufs
-                .send
-                .maybe_shrink(self.sess.max_buf_size, &mut self.rng);
-        }
-        Ok(r)
+        self.send_frame(OP_TEXT, text.as_bytes())
     }
 
     /// Send a binary frame.
     pub fn send_binary(&mut self, data: &[u8]) -> Result<SendStatus, Error> {
-        let r = self.send_frame(OP_BINARY, data)?;
-        if r == SendStatus::Done {
-            self.bufs
-                .send
-                .maybe_shrink(self.sess.max_buf_size, &mut self.rng);
-        }
-        Ok(r)
+        self.send_frame(OP_BINARY, data)
     }
 
     /// Send a ping frame for liveness detection.
@@ -275,23 +266,10 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
     /// no further data frames may be sent.  Call [`read_message`](Self::read_message)
     /// to await the server's close response.
     pub fn send_close(&mut self, code: u16, reason: &str) -> Result<SendStatus, Error> {
-        validate_send_close_code(code)?;
-        let reason = reason.as_bytes();
-        if reason.len() > 123 {
-            return Err(CallerError::CloseReasonTooLong(reason.len()).into());
-        }
-        let len = 2 + reason.len();
-        let mut payload = [0u8; 125];
-        payload[..2].copy_from_slice(&code.to_be_bytes());
-        payload[2..len].copy_from_slice(reason);
+        let (payload, len) = close_payload(code, reason)?;
         let r = self.send_frame(OP_CLOSE, &payload[..len])?;
         if r != SendStatus::RetryLater {
             self.sess.close_state = CloseState::CloseSent;
-        }
-        if r == SendStatus::Done {
-            self.bufs
-                .send
-                .maybe_shrink(self.sess.max_buf_size, &mut self.rng);
         }
         Ok(r)
     }
@@ -477,16 +455,8 @@ impl<S, R: Rng> WebSocket<S, R> {
     /// before disconnecting if a partially-sent frame must be delivered.
     pub fn disconnect(self) -> (WebSocket<(), R>, S) {
         let (stream, mut ws) = self.replace_stream(());
-        ws.bufs.read.clear();
-        ws.bufs.line_ends.clear();
-        ws.bufs.send.clear();
-        ws.bufs.fragment_buf.clear();
-        ws.sess.fragment_opcode = 0;
-        ws.sess.close_state = CloseState::Open;
-        ws.sess.flood_score = 0;
-        ws.sess.negotiated_subprotocol = None;
-        ws.sess.ping_deadline = None;
-        ws.sess.last_activity = None;
+        ws.bufs.clear();
+        ws.sess.reset();
         (ws, stream)
     }
 
