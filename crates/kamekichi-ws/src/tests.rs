@@ -338,6 +338,67 @@ fn invalid_utf8_text() {
 }
 
 #[test]
+fn fragmented_text_invalid_utf8_rejected() {
+    // Invalid byte in first fragment — rejected once enough data arrives.
+    let mut data = frame(false, OP_TEXT, &[0xFF]);
+    data.extend(frame(true, OP_CONTINUATION, b"hello"));
+    let mut ws = ws(data);
+    assert!(matches!(
+        ws.read_message(),
+        Err(Error::Reconnect(ConnError::InvalidUtf8(_)))
+    ));
+}
+
+#[test]
+fn fragmented_text_split_multibyte() {
+    // ä = [0xC3, 0xA4], split across fragments.
+    let mut data = frame(false, OP_TEXT, &[0xC3]);
+    data.extend(frame(true, OP_CONTINUATION, &[0xA4]));
+    let mut ws = ws(data);
+    match ws.read_message().unwrap().message().unwrap() {
+        Message::Text(t) => assert_eq!(t, "ä"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+#[test]
+fn fragmented_text_incomplete_at_end() {
+    // Incomplete multi-byte sequence at the end of a complete message.
+    let mut data = frame(false, OP_TEXT, b"hello");
+    data.extend(frame(true, OP_CONTINUATION, &[0xC3]));
+    let mut ws = ws(data);
+    assert!(matches!(
+        ws.read_message(),
+        Err(Error::Reconnect(ConnError::InvalidUtf8(_)))
+    ));
+}
+
+#[test]
+fn fragmented_text_three_byte_split() {
+    // U+2019 = [0xE2, 0x80, 0x99], split 1+2 across fragments.
+    let mut data = frame(false, OP_TEXT, &[0xE2]);
+    data.extend(frame(true, OP_CONTINUATION, &[0x80, 0x99]));
+    let mut ws = ws(data);
+    match ws.read_message().unwrap().message().unwrap() {
+        Message::Text(t) => assert_eq!(t, "\u{2019}"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+#[test]
+fn fragmented_text_split_across_three_fragments() {
+    // U+2019 = [0xE2, 0x80, 0x99], one byte per fragment.
+    let mut data = frame(false, OP_TEXT, &[0xE2]);
+    data.extend(frame(false, OP_CONTINUATION, &[0x80]));
+    data.extend(frame(true, OP_CONTINUATION, &[0x99]));
+    let mut ws = ws(data);
+    match ws.read_message().unwrap().message().unwrap() {
+        Message::Text(t) => assert_eq!(t, "\u{2019}"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+#[test]
 fn eof_mid_frame() {
     let mut data = vec![0x82, 100]; // FIN + binary, claims 100 bytes
     data.extend_from_slice(&[0; 5]); // only 5 follow

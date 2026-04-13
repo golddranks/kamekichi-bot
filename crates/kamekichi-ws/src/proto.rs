@@ -54,10 +54,13 @@ pub(crate) struct Buffers {
     /// Outgoing byte buffer; partially-flushed frames are retried on
     /// the next flush.
     pub(crate) send: SendBuf,
-    /// Reassembly buffer for fragmented messages.  Each continuation
-    /// frame's payload is appended here; the completed message borrows
-    /// from this buffer.
-    pub(crate) fragment_buf: Vec<u8>,
+    /// Reassembly buffer for fragmented BINARY messages.
+    pub(crate) fragment_bin: Vec<u8>,
+    /// Reassembly buffer for fragmented TEXT messages.
+    pub(crate) fragment_text: String,
+    /// Incomplete UTF-8 tail bytes from the last TEXT fragment (1–3 bytes).
+    utf8_tail: [u8; 3],
+    utf8_tail_len: u8,
 }
 
 /// Protocol state that is never borrowed by a returned [`Message`].
@@ -100,14 +103,19 @@ impl Buffers {
         Buffers {
             read: ReadBuf::with_capacity(MAX_HEADER),
             send: SendBuf::with_capacity(256),
-            fragment_buf: Vec::new(),
+            fragment_bin: Vec::new(),
+            fragment_text: String::new(),
+            utf8_tail: [0; 3],
+            utf8_tail_len: 0,
         }
     }
 
     pub(crate) fn clear(&mut self) {
         self.read.clear();
         self.send.clear();
-        self.fragment_buf.clear();
+        self.fragment_bin.clear();
+        self.fragment_text.clear();
+        self.utf8_tail_len = 0;
     }
 }
 
@@ -139,17 +147,18 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
         if bufs.read.maybe_compact(MAX_HEADER) {
             bufs.read.maybe_shrink_capacity(sess.max_buf_size, rng);
         }
-        // Shrink the fragment reassembly buffer after a large
-        // fragmented message.  Done here (top of loop) rather than
-        // at completion time because the returned Message borrows
-        // from fragment_buf — we can only free the data once the
-        // caller has dropped that borrow and re-entered read_message.
-        if sess.fragment_opcode == 0
-            && bufs.fragment_buf.capacity() > sess.max_buf_size
-            && rng.one_in_eight_odds()
-        {
-            bufs.fragment_buf.clear();
-            bufs.fragment_buf.shrink_to(sess.max_buf_size);
+        // Shrink fragment reassembly buffers after a large message.
+        // Done here (top of loop) rather than at completion time
+        // because the returned Message borrows from the buffer.
+        if sess.fragment_opcode == 0 && rng.one_in_eight_odds() {
+            if bufs.fragment_bin.capacity() > sess.max_buf_size {
+                bufs.fragment_bin.clear();
+                bufs.fragment_bin.shrink_to(sess.max_buf_size);
+            }
+            if bufs.fragment_text.capacity() > sess.max_buf_size {
+                bufs.fragment_text.clear();
+                bufs.fragment_text.shrink_to(sess.max_buf_size);
+            }
         }
 
         // Track how many bytes fill_from reads from the OS.
@@ -244,22 +253,38 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
                 if sess.fragment_opcode == 0 {
                     return Err(ConnError::UnexpectedContinuation);
                 }
-                let total = bufs.fragment_buf.len() + payload_len;
-                if total > sess.max_payload {
-                    return Err(ConnError::FragmentedMessageTooLarge(total));
-                }
-                bufs.fragment_buf
-                    .extend_from_slice(&bufs.read.filled()[payload_range]);
-                if fin {
-                    let opcode = sess.fragment_opcode;
-                    sess.fragment_opcode = 0;
-                    let relief = 1.max(bufs.fragment_buf.len() / SMALL_READ_THRESHOLD);
-                    sess.flood_score = sess.flood_score.saturating_sub(relief);
-                    let buf = &bufs.fragment_buf;
-                    return Ok(Some(match opcode {
-                        OP_TEXT => Message::Text(std::str::from_utf8(buf)?),
-                        _ => Message::Binary(buf),
-                    }));
+                let payload = &bufs.read.filled()[payload_range];
+                if sess.fragment_opcode == OP_TEXT {
+                    let total =
+                        bufs.fragment_text.len() + bufs.utf8_tail_len as usize + payload_len;
+                    if total > sess.max_payload {
+                        return Err(ConnError::FragmentedMessageTooLarge(total));
+                    }
+                    push_text_payload(
+                        &mut bufs.fragment_text,
+                        &mut bufs.utf8_tail,
+                        &mut bufs.utf8_tail_len,
+                        payload,
+                        fin,
+                    )?;
+                    if fin {
+                        sess.fragment_opcode = 0;
+                        let relief = 1.max(bufs.fragment_text.len() / SMALL_READ_THRESHOLD);
+                        sess.flood_score = sess.flood_score.saturating_sub(relief);
+                        return Ok(Some(Message::Text(&bufs.fragment_text)));
+                    }
+                } else {
+                    let total = bufs.fragment_bin.len() + payload_len;
+                    if total > sess.max_payload {
+                        return Err(ConnError::FragmentedMessageTooLarge(total));
+                    }
+                    bufs.fragment_bin.extend_from_slice(payload);
+                    if fin {
+                        sess.fragment_opcode = 0;
+                        let relief = 1.max(bufs.fragment_bin.len() / SMALL_READ_THRESHOLD);
+                        sess.flood_score = sess.flood_score.saturating_sub(relief);
+                        return Ok(Some(Message::Binary(&bufs.fragment_bin)));
+                    }
                 }
             }
 
@@ -276,9 +301,22 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
                         _ => Message::Binary(buf),
                     }));
                 }
-                bufs.fragment_buf.clear();
-                bufs.fragment_buf
-                    .extend_from_slice(&bufs.read.filled()[payload_range]);
+                // Start fragmented message.
+                let payload = &bufs.read.filled()[payload_range];
+                if opcode == OP_TEXT {
+                    bufs.fragment_text.clear();
+                    bufs.utf8_tail_len = 0;
+                    push_text_payload(
+                        &mut bufs.fragment_text,
+                        &mut bufs.utf8_tail,
+                        &mut bufs.utf8_tail_len,
+                        payload,
+                        false,
+                    )?;
+                } else {
+                    bufs.fragment_bin.clear();
+                    bufs.fragment_bin.extend_from_slice(payload);
+                }
                 sess.fragment_opcode = opcode;
             }
 
@@ -595,6 +633,77 @@ fn validate_recv_close_code(code: u16) -> Result<(), ConnError> {
         1000..=4999 => Ok(()),
         _ => Err(ConnError::InvalidCloseCode(code)),
     }
+}
+
+/// Append a TEXT fragment payload, validating UTF-8 incrementally
+/// using [`utf8_chunks`](slice::utf8_chunks).
+///
+/// Incomplete multi-byte sequences at fragment boundaries are saved in
+/// `tail` and prepended to the next fragment.  On `is_final`, any
+/// leftover tail bytes are an error.
+fn push_text_payload(
+    text: &mut String,
+    tail: &mut [u8; 3],
+    tail_len: &mut u8,
+    data: &[u8],
+    is_final: bool,
+) -> Result<(), ConnError> {
+    // Complete pending tail by appending a few bytes from data.
+    let consumed = if *tail_len == 0 {
+        0
+    } else {
+        let tl = *tail_len as usize;
+        let take = data.len().min(3);
+        let mut buf = [0u8; 6];
+        buf[..tl].copy_from_slice(&tail[..tl]);
+        buf[tl..tl + take].copy_from_slice(&data[..take]);
+
+        let chunk = buf[..tl + take]
+            .utf8_chunks()
+            .next()
+            .expect("utf8_chunks always yields at least one chunk");
+
+        let (val, inv) = (chunk.valid(), chunk.invalid());
+        if !val.is_empty() {
+            // a valid chunk that couldn't be parsed before,
+            // was succesfully parsed → we made progress past the boundary
+            text.push_str(val);
+            val.len() - tl
+        } else if inv.len() < 4 && !is_final {
+            // not enough data for fully parsing, so we'll just
+            // store the bytes in the tail buffer for the next fragment
+            tail[..inv.len()].copy_from_slice(inv);
+            *tail_len = inv.len() as u8;
+            return Ok(());
+        } else {
+            return Err(ConnError::InvalidUtf8(
+                std::str::from_utf8(&buf[..tl + take]).unwrap_err(),
+            ));
+        }
+    };
+
+    // Main data — single pass.
+    let data = &data[consumed..];
+    if data.is_empty() {
+        return Ok(());
+    }
+    let chunk = &data
+        .utf8_chunks()
+        .next()
+        .expect("utf8_chunks always yields at least one chunk");
+    text.push_str(chunk.valid());
+    let inv = chunk.invalid();
+    if !inv.is_empty() {
+        if is_final {
+            return Err(ConnError::InvalidUtf8(
+                std::str::from_utf8(inv).unwrap_err(),
+            ));
+        }
+        tail[..inv.len()].copy_from_slice(inv);
+        *tail_len = inv.len() as u8;
+    }
+
+    Ok(())
 }
 
 /// Handle an incoming close frame: validate, echo if needed, return.
