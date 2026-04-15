@@ -113,13 +113,17 @@ The crate is feature-complete and thoroughly tested.
 
 All of these are plausible features, but I'm not sure if the need is there,
 and they wouldn't pull their weigh without an actual downstream use / need.
-They are out of scope for 1.0, but not rejected outright.
+Many are out of scope for 1.0, but not rejected outright. It might be that
+I want to have a working prototype of each before 1.0, just to be sure that
+I don't have to have breaking changes later, before committing to a stable
+API.
 
 - no_std support
 - async support
 - compression support
 - sending fragmented messages
 - server mode
+- splitting reader and writer
 
 ### TODO for releasing 1.0
 
