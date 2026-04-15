@@ -409,6 +409,46 @@ fn eof_mid_frame() {
     ));
 }
 
+#[test]
+fn io_error_mid_frame() {
+    // Valid frame header claiming 100-byte binary payload, but the
+    // reader errors after delivering only the header.
+    struct ErrorAfterHeader {
+        header: Cursor<Vec<u8>>,
+        errored: bool,
+    }
+    impl Read for ErrorAfterHeader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.header.read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            if !self.errored {
+                self.errored = true;
+                return Err(io::Error::new(io::ErrorKind::ConnectionReset, "reset"));
+            }
+            Ok(0)
+        }
+    }
+    impl Write for ErrorAfterHeader {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let header = vec![0x82, 100]; // FIN + binary, claims 100 bytes
+    let mut ws = WebSocket::new(CounterRng(0)).with_stream(ErrorAfterHeader {
+        header: Cursor::new(header),
+        errored: false,
+    });
+    assert!(matches!(
+        ws.read_message(),
+        Err(Error::Reconnect(ConnError::Io(_)))
+    ));
+}
+
 // ---- Compaction ----
 
 #[test]
@@ -776,6 +816,94 @@ fn connect_eof_mid_headers() {
         WebSocket::new(CounterRng(0)).connect(ConnectMock::with_response(rx), "example.com", "/"),
         Err(Error::Reconnect(ConnError::Closed))
     ));
+}
+
+// ---- Connect error paths ----
+
+/// Stream that fails on write (covers From<io::Error> for ConnectionError).
+struct WriteFailConnectMock;
+
+impl Read for WriteFailConnectMock {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Ok(0)
+    }
+}
+
+impl Write for WriteFailConnectMock {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::Error::new(io::ErrorKind::BrokenPipe, "broken"))
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Stream that accepts the handshake write, then returns an error on read.
+struct ReadErrorConnectMock {
+    tx: Vec<u8>,
+}
+
+impl Read for ReadErrorConnectMock {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::new(io::ErrorKind::ConnectionReset, "reset"))
+    }
+}
+
+impl Write for ReadErrorConnectMock {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.tx.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Stream that accepts the handshake write, then returns WouldBlock on read.
+struct ReadWouldBlockConnectMock {
+    tx: Vec<u8>,
+}
+
+impl Read for ReadWouldBlockConnectMock {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::new(io::ErrorKind::WouldBlock, "blocked"))
+    }
+}
+
+impl Write for ReadWouldBlockConnectMock {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.tx.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn connect_write_fails() {
+    let result = WebSocket::new(CounterRng(0)).connect(WriteFailConnectMock, "example.com", "/");
+    assert!(matches!(result, Err(Error::Reconnect(ConnError::Io(_)))));
+}
+
+#[test]
+fn connect_io_error_during_headers() {
+    let result = WebSocket::new(CounterRng(0)).connect(
+        ReadErrorConnectMock { tx: Vec::new() },
+        "example.com",
+        "/",
+    );
+    assert!(matches!(result, Err(Error::Reconnect(ConnError::Io(_)))));
+}
+
+#[test]
+fn connect_would_block_during_headers() {
+    let result = WebSocket::new(CounterRng(0)).connect(
+        ReadWouldBlockConnectMock { tx: Vec::new() },
+        "example.com",
+        "/",
+    );
+    assert!(matches!(result, Err(Error::Reconnect(ConnError::Io(_)))));
 }
 
 // ---- Send frame verification ----
@@ -1247,7 +1375,7 @@ fn from_impls() {
     // From<Utf8Error> for ConnError
     let _: ConnError = make_utf8_error().into();
     // From<FillFromError> for ConnError
-    let e: ConnError = crate::read_buf::FillFromError::Eof.into();
+    let e: ConnError = crate::read_buf::FillError::Eof.into();
     assert!(matches!(e, ConnError::Closed));
     // From<FlushError> for Error
     let _: Error = crate::send_buf::FlushError::WriteClosed.into();
@@ -1811,7 +1939,7 @@ fn read_until_buffer_full() {
         16,
         |_| Ok(None), // never accept
     );
-    assert!(matches!(result, Err(ReadUntilError::BufferFull)));
+    assert!(matches!(result, Err(ReadUntilError::LimitReached)));
 }
 
 #[test]
@@ -1842,6 +1970,36 @@ fn read_until_io_error() {
     }
     let result = buf.read_until::<(), ReadUntilError<()>>(&mut ErrorReader, 64, |_| Ok(None));
     assert!(matches!(result, Err(ReadUntilError::Io(_))));
+}
+
+#[test]
+fn read_until_would_block() {
+    let mut buf = ReadBuf::with_capacity(64);
+    struct WouldBlockReader;
+    impl Read for WouldBlockReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::WouldBlock, "blocked"))
+        }
+    }
+    let result = buf.read_until::<(), ReadUntilError<()>>(&mut WouldBlockReader, 64, |_| Ok(None));
+    assert!(matches!(result, Err(ReadUntilError::WouldBlock)));
+}
+
+#[test]
+fn read_buf_shrinks_after_large_fill() {
+    let mut buf = ReadBuf::with_capacity(64);
+    // Fill with enough data to grow capacity well past 128.
+    buf.fill_from(&mut Cursor::new(vec![b'x'; 8192]), 8192)
+        .unwrap();
+    buf.consume(8192);
+    buf.compact();
+    // ZeroRng always returns 0, so one_in_eight_odds (0 & 0b111 == 0) triggers.
+    // This exercises the truncate + shrink_to path.
+    buf.maybe_shrink_capacity(128, &mut ZeroRng);
+    // Buffer still works after shrinking.
+    buf.fill_from(&mut Cursor::new(b"hello".to_vec()), 5)
+        .unwrap();
+    assert_eq!(buf.pending(), b"hello");
 }
 
 // ---- Pending send hard error during read_message ----

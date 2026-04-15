@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::io;
 use std::str::Utf8Error;
 
-use crate::read_buf::FillFromError;
+use crate::read_buf::FillError;
 use crate::send_buf::FlushError;
 
 /// Actionable error from a WebSocket operation.
@@ -167,11 +167,14 @@ impl From<FlushError> for ConnectionError {
     }
 }
 
-impl From<FillFromError> for ConnectionError {
-    fn from(e: FillFromError) -> Self {
+impl From<FillError> for ConnectionError {
+    fn from(e: FillError) -> Self {
         match e {
-            FillFromError::Eof => ConnectionError::Closed,
-            FillFromError::Io(e) => ConnectionError::Io(e),
+            FillError::Eof => ConnectionError::Closed,
+            FillError::Io(e) => ConnectionError::Io(e),
+            FillError::WouldBlock => {
+                ConnectionError::Io(io::Error::from(io::ErrorKind::WouldBlock))
+            }
         }
     }
 }
@@ -210,8 +213,8 @@ impl StdError for CallerError {}
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Reconnect(_) => write!(f, "connection error"),
-            Error::Fatal(_) => write!(f, "caller error"),
+            Error::Reconnect(e) => write!(f, "connection error: {e}"),
+            Error::Fatal(e) => write!(f, "caller error: {e}"),
         }
     }
 }

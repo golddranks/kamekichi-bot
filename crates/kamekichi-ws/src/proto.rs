@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::time::Instant;
 
 use base64::Engine;
@@ -162,7 +162,7 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
         }
 
         // Track how many bytes fill_from reads from the OS.
-        let end_before = bufs.read.filled().len();
+        let end_before = bufs.read.all_read().len();
 
         // Parse frame header
         let (fin, opcode, payload_len) = {
@@ -234,7 +234,7 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
 
         // A small read means data trickled in (one frame); a big
         // read (or no read at all) means data was already buffered.
-        let bytes_read = bufs.read.filled().len() - end_before;
+        let bytes_read = bufs.read.all_read().len() - end_before;
         if bytes_read > 0 && bytes_read <= SMALL_READ_THRESHOLD {
             sess.flood_score = sess.flood_score.saturating_sub(1);
         }
@@ -245,7 +245,7 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
             return Err(ConnError::Flood);
         }
 
-        let pos = bufs.read.pos();
+        let pos = bufs.read.cursor();
         let payload_range = pos - payload_len..pos;
 
         match opcode {
@@ -253,7 +253,7 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
                 if sess.fragment_opcode == 0 {
                     return Err(ConnError::UnexpectedContinuation);
                 }
-                let payload = &bufs.read.filled()[payload_range];
+                let payload = &bufs.read.all_read()[payload_range];
                 if sess.fragment_opcode == OP_TEXT {
                     let total =
                         bufs.fragment_text.len() + bufs.utf8_tail_len as usize + payload_len;
@@ -295,14 +295,14 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
                 if fin {
                     let relief = 1.max(payload_len / SMALL_READ_THRESHOLD);
                     sess.flood_score = sess.flood_score.saturating_sub(relief);
-                    let buf = &bufs.read.filled()[payload_range];
+                    let buf = &bufs.read.all_read()[payload_range];
                     return Ok(Some(match opcode {
                         OP_TEXT => Message::Text(std::str::from_utf8(buf)?),
                         _ => Message::Binary(buf),
                     }));
                 }
                 // Start fragmented message.
-                let payload = &bufs.read.filled()[payload_range];
+                let payload = &bufs.read.all_read()[payload_range];
                 if opcode == OP_TEXT {
                     bufs.fragment_text.clear();
                     bufs.utf8_tail_len = 0;
@@ -327,7 +327,7 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
                     stream,
                     &mut bufs.send,
                     rng,
-                    bufs.read.get(payload_range),
+                    bufs.read.slice(payload_range),
                     echo,
                 )
                 .map(Some);
@@ -339,7 +339,7 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
             // connection is torn down.
             OP_PING => {
                 if bufs.send.pending_len() < sess.max_buf_size {
-                    build_frame(&mut bufs.send, rng, OP_PONG, bufs.read.get(payload_range));
+                    build_frame(&mut bufs.send, rng, OP_PONG, bufs.read.slice(payload_range));
                 }
                 bufs.send.try_flush(stream);
             }
@@ -469,7 +469,13 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                 .map_err(|e| match e {
                     ReadUntilError::Eof => ConnError::Closed,
                     ReadUntilError::Io(e) => ConnError::Io(e),
-                    ReadUntilError::BufferFull => ConnError::HeadersTooLarge,
+                    ReadUntilError::WouldBlock => {
+                        ConnError::Io(io::Error::from(io::ErrorKind::WouldBlock))
+                    }
+                    // The callback already checks data.len() >= MAX_HEADER,
+                    // so it always returns HeadersTooLarge before the byte
+                    // limit fires.
+                    ReadUntilError::LimitReached => unreachable!(),
                     ReadUntilError::UserError(e) => e,
                 })?
         };

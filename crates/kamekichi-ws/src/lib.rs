@@ -10,14 +10,16 @@
 //! 1. **Create** — [`WebSocket::new`] allocates buffers (no I/O).
 //!    Chain [`max_payload`](WebSocket::max_payload) /
 //!    [`max_buf_size`](WebSocket::max_buf_size) to configure limits.
+//!    // TODO: ↑ are this all?
 //! 2. **Connect** — [`connect`](WebSocket::connect) (or
 //!    [`try_connect`](WebSocket::try_connect)) performs the HTTP upgrade
 //!    handshake.  Pass extra headers with
 //!    [`connect_with_headers`](WebSocket::connect_with_headers).
+//!    // TODO: ↑ is this all? What about subprotocols? Should it be mentioned that the stream is handed in here?
 //! 3. **Message loop** — [`read_message`](WebSocket::read_message)
 //!    returns [`ReadStatus`]: either a [`Message`] or
 //!    [`Idle`](ReadStatus::Idle).  Check
-//!    [`last_activity`](WebSocket::last_activity) for liveness.
+//!    [`last_activity`](WebSocket::last_activity) for connection health.
 //!    Send with [`send_text`](WebSocket::send_text) /
 //!    [`send_binary`](WebSocket::send_binary).
 //! 4. **Close** — [`send_close`](WebSocket::send_close), then keep
@@ -26,6 +28,7 @@
 //! 5. **Reuse** — [`disconnect`](WebSocket::disconnect) returns the
 //!    streamless `WebSocket` and the stream separately; the `WebSocket`
 //!    can be reconnected without reallocating.
+//!    // TODO: check that the closing and disconnecting logic is sound
 
 mod error;
 mod proto;
@@ -43,6 +46,7 @@ pub use error::{CallerError, ConnectionError, Error};
 use proto::*;
 pub use rng::Rng;
 
+// TODO: these should be in proto.rs?
 /// Default maximum payload size: 16 MiB.
 pub(crate) const DEFAULT_MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 /// Default target buffer capacity: 1 MiB.
@@ -53,12 +57,12 @@ pub(crate) const DEFAULT_MAX_BUF_SIZE: usize = 1024 * 1024;
 /// Outcome of a send operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendStatus {
-    /// Frame fully written to the stream.
+    /// Frame fully written to the stream. // TODO: no quarantees about flushing, right?
     Done,
-    /// Frame is queued in the send buffer but not yet (fully) flushed.
+    /// Frame is queued in the `WebSocket`s own send buffer but not yet (fully) written.
     /// Call [`WebSocket::flush`] to finish sending.
     Queued,
-    /// A previously queued frame is still draining and the new frame was
+    /// A previously queued frame is still draining (// TODO: draining? try to be consistent with the vocabulary) and the new frame was
     /// **not** built.  Call [`WebSocket::flush`] to finish the pending
     /// write, then retry the send.
     RetryLater,
@@ -72,7 +76,7 @@ pub enum Message<'a> {
     Text(&'a str),
     /// A binary message.
     Binary(&'a [u8]),
-    /// A close frame with optional status code and reason.
+    /// A close frame with optional status code and reason. // TODO: Option? What about status code 1005
     Close(Option<u16>, &'a str),
 }
 
@@ -192,6 +196,10 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         build_frame(&mut self.bufs.send, &mut self.rng, opcode, payload);
         match self.bufs.send.flush(&mut self.stream) {
             Ok(()) => {
+                // Best-effort transport flush — the frame is already in
+                // the stream's write buffer.  Callers who need delivery
+                // confirmation should follow up with [`flush`](Self::flush),
+                // which propagates stream.flush() errors.
                 let _ = self.stream.flush();
                 self.bufs
                     .send
@@ -203,6 +211,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
         }
     }
 
+    // TODO: this is a bad name, as it conflates "flush" (underlying stream flush) with "write"
     /// Flush any queued send data to the stream.
     ///
     /// Call this after a send method returns [`SendStatus::Queued`] or
@@ -477,6 +486,7 @@ impl<S, R: Rng> WebSocket<S, R> {
     /// Set the target buffer capacity.  After processing a large message
     /// the read buffer is shrunk back to this size.  Default: 1 MiB.
     /// Clamped to a minimum of 125.
+    /// TODO: not a great name, as this can be temporary topped
     pub fn max_buf_size(mut self, max: usize) -> Self {
         self.sess.max_buf_size = max.max(125);
         self
