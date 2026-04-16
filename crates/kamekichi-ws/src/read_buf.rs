@@ -127,12 +127,12 @@ impl ReadBuf {
         }
     }
 
-    /// Get unconsumed data in the buffer.
+    /// Unconsumed data in the buffer.
     pub fn pending(&self) -> &[u8] {
         &self.buf[self.start..self.end]
     }
 
-    /// Access the initialized part of the backing buffer by absolute range.
+    /// Initialized part of the backing buffer at the given absolute range.
     ///
     /// # Panics
     ///
@@ -156,7 +156,7 @@ impl ReadBuf {
     ///
     /// # Panics
     ///
-    /// May panic if `n` exceeds the pending data length.
+    /// May or may not panic if `n` exceeds the pending data length.
     pub fn consume(&mut self, n: usize) {
         debug_assert!(
             n <= self.end - self.start,
@@ -278,9 +278,7 @@ impl ReadBuf {
     /// Compacts when either all data is consumed, or the consumed prefix
     /// exceeds both `threshold` and half of total data read (`end`).
     pub fn maybe_compact(&mut self, threshold: usize) -> bool {
-        if self.start > 0
-            && (self.start == self.end || (self.start > threshold && self.start > self.end / 2))
-        {
+        if self.start > 0 && (self.start == self.end || self.start > threshold.max(self.end / 2)) {
             self.compact();
             true
         } else {
@@ -290,9 +288,12 @@ impl ReadBuf {
 
     /// Probabilistically shrink the backing allocation if capacity
     /// exceeds `max_cap`.  Should be called after compacting.
+    ///
+    /// # Panics
+    ///
+    /// May or may not panic if `start > 0`.
     pub fn maybe_shrink_capacity(&mut self, max_cap: usize, rng: &mut impl Rng) {
-        // Only effective when start == 0 (i.e. after compact) and when
-        // the current data length doesn't already exceed max_cap.
+        debug_assert!(self.start == 0, "call compact() before shrinking");
         if self.start == 0 && self.buf.capacity() > max_cap && rng.one_in_eight_odds() {
             self.buf.truncate(self.end);
             self.buf.shrink_to(max_cap);
