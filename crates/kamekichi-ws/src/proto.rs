@@ -253,7 +253,7 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
                 if sess.fragment_opcode == 0 {
                     return Err(ConnError::UnexpectedContinuation);
                 }
-                let payload = &bufs.read.all_read()[payload_range];
+                let payload = bufs.read.slice(payload_range);
                 if sess.fragment_opcode == OP_TEXT {
                     let total =
                         bufs.fragment_text.len() + bufs.utf8_tail_len as usize + payload_len;
@@ -295,14 +295,14 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
                 if fin {
                     let relief = 1.max(payload_len / SMALL_READ_THRESHOLD);
                     sess.flood_score = sess.flood_score.saturating_sub(relief);
-                    let buf = &bufs.read.all_read()[payload_range];
+                    let buf = bufs.read.slice(payload_range);
                     return Ok(Some(match opcode {
                         OP_TEXT => Message::Text(std::str::from_utf8(buf)?),
                         _ => Message::Binary(buf),
                     }));
                 }
                 // Start fragmented message.
-                let payload = &bufs.read.all_read()[payload_range];
+                let payload = bufs.read.slice(payload_range);
                 if opcode == OP_TEXT {
                     bufs.fragment_text.clear();
                     bufs.utf8_tail_len = 0;

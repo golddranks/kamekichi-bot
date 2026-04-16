@@ -57,7 +57,7 @@ use crate::rng::Rng;
 
 /// Error from [`ReadBuf::read_until`].
 #[derive(Debug)]
-pub(crate) enum ReadUntilError<E> {
+pub enum ReadUntilError<E> {
     /// The stream reached EOF before enough data was available.
     Eof,
     /// An IO error occurred while reading.
@@ -72,7 +72,7 @@ pub(crate) enum ReadUntilError<E> {
 
 /// Error from [`ReadBuf::fill_from`].
 #[derive(Debug)]
-pub(crate) enum FillError {
+pub enum FillError {
     /// The stream reached EOF before enough data was available.
     Eof,
     /// An IO error occurred while reading.
@@ -92,7 +92,7 @@ impl<E> From<FillError> for ReadUntilError<E> {
 }
 
 /// The main buffer container. See [module docs](self) for layout and design.
-pub(crate) struct ReadBuf {
+pub struct ReadBuf {
     buf: Vec<u8>,
     start: usize,
     end: usize,
@@ -120,7 +120,7 @@ impl ReadBuf {
     }
 
     /// Number of unconsumed bytes in the buffer.
-    pub fn pending_len(&self) -> usize {
+    fn pending_len(&self) -> usize {
         debug_assert!(self.start <= self.end);
         self.end - self.start
     }
@@ -130,11 +130,12 @@ impl ReadBuf {
         &self.buf[self.start..self.end]
     }
 
-    /// Initialized part of the backing buffer at the given absolute range.
+    /// Initialized part of the backing buffer (including read-into
+    /// and zero-initialized regions) at the given absolute range.
     ///
     /// # Panics
     ///
-    /// Panics if the range extends past `len` (the initialized region).
+    /// Panics if the range extends past `self.buf.len()`.
     pub fn slice(&self, range: Range<usize>) -> &[u8] {
         &self.buf[range]
     }
@@ -290,8 +291,8 @@ impl ReadBuf {
         }
     }
 
-    /// Probabilistically shrink the backing allocation back to the target size
-    /// if capacity exceeds `max_cap` to amortize reallocation cost when buffer
+    /// Probabilistically shrink the backing allocation down toward `max_cap`
+    /// if capacity exceeds it, to amortize reallocation cost when buffer
     /// size spikes repeatedly. Should be called after compacting.
     ///
     /// # Panics
