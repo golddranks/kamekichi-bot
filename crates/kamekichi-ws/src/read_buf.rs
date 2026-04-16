@@ -219,11 +219,13 @@ impl ReadBuf {
         {
             return Ok(v);
         }
-        self.ensure_initialized(self.start.saturating_add(limit));
+        let target = self.start.saturating_add(limit);
+        self.ensure_initialized(target);
+        // `read_once` requires `end < buf.len()`: the exit check
+        // ensures `end < target`, and `ensure_initialized` ensures
+        // `target < buf.len()`. `target` is fixed: `f` borrows `&Self`.
         loop {
-            if self.pending_len() >= limit {
-                // Pending data reached the caller's limit — f already
-                // saw all data on the previous iteration.
+            if self.end >= target {
                 return Err(ReadUntilError::LimitReached);
             }
             self.read_once(reader)?;
@@ -260,6 +262,10 @@ impl ReadBuf {
                 Ok(0) => return Err(FillError::Eof),
                 Ok(n) => {
                     self.end += n;
+                    assert!(
+                        self.end <= self.buf.len(),
+                        "Buggy Read::read returned count exceeding buffer length",
+                    );
                     return Ok(());
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
