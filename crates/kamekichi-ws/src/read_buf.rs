@@ -55,14 +55,6 @@ use std::ops::Range;
 
 use crate::rng::Rng;
 
-/// Floor for the readable slice reserved at the start of a read loop
-/// to avoid tiny reads.
-const MIN_READ_SLICE: usize = 4096;
-
-/// Extra headroom past the requested length, so reads near the target still
-/// get reasonably sized slices.
-const MIN_READ_HEADROOM: usize = 512;
-
 /// Error from [`ReadBuf::read_until`].
 #[derive(Debug)]
 pub(crate) enum ReadUntilError<E> {
@@ -194,7 +186,8 @@ impl ReadBuf {
     /// `limit` bytes of pending data have accumulated and `f`
     /// hasn't produced a value, [`ReadUntilError::LimitReached`] is
     /// returned. A single read may buffer data beyond `limit`;
-    /// that extra data remains available for later operations.
+    /// that extra is available in the pending section, and the
+    /// data is meant to remain available for later operations.
     pub fn read_until<T, E>(
         &mut self,
         reader: &mut impl Read,
@@ -224,8 +217,14 @@ impl ReadBuf {
     /// Ensure the buffer is initialized to at least `target`.
     /// May initialize more than requested for efficiency.
     fn ensure_initialized(&mut self, target: usize) {
-        // Headroom past `target` so that reads near the limit still get
-        // reasonably sized slices instead of dwindling to single bytes.
+        /// Floor for the readable slice reserved at the start of a read loop
+        /// to avoid tiny reads.
+        const MIN_READ_SLICE: usize = 4096;
+
+        /// Extra headroom past the requested length, so reads closing near the
+        /// target still get reasonably sized slices.
+        const MIN_READ_HEADROOM: usize = 512;
+
         let needed = target
             .saturating_add(MIN_READ_HEADROOM)
             .max(self.end.saturating_add(MIN_READ_SLICE));
@@ -263,8 +262,7 @@ impl ReadBuf {
     /// don't need to zero-initialize again.
     pub fn compact(&mut self) {
         if self.start == self.end {
-            self.start = 0;
-            self.end = 0;
+            self.clear();
         } else if self.start > 0 {
             self.buf.copy_within(self.start..self.end, 0);
             self.end -= self.start;
