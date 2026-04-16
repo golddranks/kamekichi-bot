@@ -40,8 +40,8 @@
 //! the bytes — they remain in `buf[0..start]` until the next
 //! [`compact`](ReadBuf::compact). This allows callers to consume a
 //! frame header while still borrowing the payload via
-//! [`ReadBuf::cursor`], [`ReadBuf::all_read`], or [`ReadBuf::slice`] with
-//! absolute ranges — without copying to a separate buffer.
+//! [`ReadBuf::all_read`] or [`ReadBuf::slice`] (using [`ReadBuf::cursor`]
+//! for the offset) — without copying to a separate buffer.
 //!
 //! # Memory lifecycle
 //!
@@ -119,6 +119,12 @@ impl ReadBuf {
         }
     }
 
+    /// Number of unconsumed bytes in the buffer.
+    pub fn pending_len(&self) -> usize {
+        debug_assert!(self.start <= self.end);
+        self.end - self.start
+    }
+
     /// Unconsumed data in the buffer.
     pub fn pending(&self) -> &[u8] {
         &self.buf[self.start..self.end]
@@ -151,9 +157,9 @@ impl ReadBuf {
     /// May or may not panic if `n` exceeds the pending data length.
     pub fn consume(&mut self, n: usize) {
         debug_assert!(
-            n <= self.end - self.start,
+            n <= self.pending_len(),
             "consume({n}) exceeds pending length ({})",
-            self.end - self.start,
+            self.pending_len(),
         );
         self.start = self.end.min(self.start.saturating_add(n));
     }
@@ -202,7 +208,7 @@ impl ReadBuf {
         }
         self.ensure_initialized(self.start.saturating_add(limit));
         loop {
-            if self.end - self.start >= limit {
+            if self.pending_len() >= limit {
                 // Pending data reached the caller's limit — f already
                 // saw all data on the previous iteration.
                 return Err(ReadUntilError::LimitReached);
@@ -284,12 +290,13 @@ impl ReadBuf {
         }
     }
 
-    /// Probabilistically shrink the backing allocation if capacity
-    /// exceeds `max_cap`.  Should be called after compacting.
+    /// Probabilistically shrink the backing allocation back to the target size
+    /// if capacity exceeds `max_cap` to amortize reallocation cost when buffer
+    /// size spikes repeatedly. Should be called after compacting.
     ///
     /// # Panics
     ///
-    /// May or may not panic if `start > 0`.
+    /// May or may not panic if not compacted, i.e. `start > 0`.
     pub fn maybe_shrink_capacity(&mut self, max_cap: usize, rng: &mut impl Rng) {
         debug_assert!(self.start == 0, "call compact() before shrinking");
         if self.start == 0 && self.buf.capacity() > max_cap && rng.one_in_eight_odds() {
