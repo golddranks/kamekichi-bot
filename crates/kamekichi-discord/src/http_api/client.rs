@@ -167,7 +167,10 @@ impl Client {
             let resp = self.request_once(method, path, body)?;
             self.record_rate_limit(&route_key, &resp);
             let RawResponse {
-                status, body: resp_body, retry_after, ..
+                status,
+                body: resp_body,
+                retry_after,
+                ..
             } = resp;
             if status == 429 {
                 last_status = status;
@@ -275,7 +278,6 @@ fn send_and_read(
     path: &str,
     body: Option<&str>,
 ) -> Result<RawResponse, Error> {
-
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\n\
@@ -594,7 +596,15 @@ mod tests {
 
     fn do_request(response: Vec<u8>) -> Result<RawResponse, Error> {
         let mut stream = MockStream::new(response);
-        send_and_read(&mut stream, "discord.com", "tok", "test-agent", Method::Get, "/test", None)
+        send_and_read(
+            &mut stream,
+            "discord.com",
+            "tok",
+            "test-agent",
+            Method::Get,
+            "/test",
+            None,
+        )
     }
 
     // -- Fixed body --

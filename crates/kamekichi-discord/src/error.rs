@@ -137,4 +137,3 @@ impl From<kamekichi_ws::Error> for Error {
         Error::WebSocket(e)
     }
 }
-

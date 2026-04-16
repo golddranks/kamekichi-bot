@@ -372,35 +372,39 @@ impl Session {
                         .get_ref()
                         .set_read_timeout(Some(heartbeat.poll_timeout().min(remaining)))?;
                     match ws.read_message() {
-                        Ok(ws::ReadStatus::Message(ws::Message::Text(text))) => match process_text(text)? {
-                            GatewayAction::HeartbeatAck => heartbeat.receive_ack(),
-                            GatewayAction::SendHeartbeat => {
-                                heartbeat.server_requested(&mut ws, None, &mut write_buf)?;
-                            }
-                            GatewayAction::Dispatch(dispatch) => {
-                                let event_type =
-                                    dispatch.event_type.ok_or(Error::MalformedDispatch)?;
-                                let data = dispatch.data.ok_or(Error::MissingPayload)?;
-                                if event_type != EventType::Ready {
-                                    return Err(Error::UnexpectedHandshakeDispatch);
+                        Ok(ws::ReadStatus::Message(ws::Message::Text(text))) => {
+                            match process_text(text)? {
+                                GatewayAction::HeartbeatAck => heartbeat.receive_ack(),
+                                GatewayAction::SendHeartbeat => {
+                                    heartbeat.server_requested(&mut ws, None, &mut write_buf)?;
                                 }
-                                let ready: msg::Ready = serde_json::from_str(data)?;
-                                break SessData {
-                                    session_id: ready.session_id,
-                                    resume_gateway_url: ready.resume_gateway_url,
-                                    sequence: dispatch.sequence,
-                                    bot_user_id: ready.user.id,
-                                    guild_ids: ready.guilds.iter().map(|g| g.id).collect(),
-                                };
+                                GatewayAction::Dispatch(dispatch) => {
+                                    let event_type =
+                                        dispatch.event_type.ok_or(Error::MalformedDispatch)?;
+                                    let data = dispatch.data.ok_or(Error::MissingPayload)?;
+                                    if event_type != EventType::Ready {
+                                        return Err(Error::UnexpectedHandshakeDispatch);
+                                    }
+                                    let ready: msg::Ready = serde_json::from_str(data)?;
+                                    break SessData {
+                                        session_id: ready.session_id,
+                                        resume_gateway_url: ready.resume_gateway_url,
+                                        sequence: dispatch.sequence,
+                                        bot_user_id: ready.user.id,
+                                        guild_ids: ready.guilds.iter().map(|g| g.id).collect(),
+                                    };
+                                }
                             }
-                        },
+                        }
                         Ok(ws::ReadStatus::Message(ws::Message::Close(code, reason))) => {
                             return Err(Error::GatewayClosed {
                                 code,
                                 reason: reason.to_owned(),
                             });
                         }
-                        Ok(ws::ReadStatus::Message(ws::Message::Binary(_))) => return Err(Error::UnexpectedBinary),
+                        Ok(ws::ReadStatus::Message(ws::Message::Binary(_))) => {
+                            return Err(Error::UnexpectedBinary);
+                        }
                         Ok(ws::ReadStatus::Idle) => {
                             heartbeat.send_if_due(&mut ws, None, &mut write_buf)?;
                         }
@@ -471,7 +475,9 @@ impl Session {
                         reason: reason.to_owned(),
                     });
                 }
-                Ok(ws::ReadStatus::Message(ws::Message::Binary(_))) => return Err(Error::UnexpectedBinary),
+                Ok(ws::ReadStatus::Message(ws::Message::Binary(_))) => {
+                    return Err(Error::UnexpectedBinary);
+                }
                 Ok(ws::ReadStatus::Idle) => return Ok(None),
                 Err(ws::Error::Reconnect(ws::ConnectionError::Closed)) => {
                     return Err(Error::ConnectionClosed);

@@ -35,11 +35,7 @@ impl HttpApi {
 
     /// Post a message to a channel. Returns the new message's snowflake ID,
     /// or `None` if the response didn't contain a parseable `"id"` field.
-    pub fn send_message(
-        &mut self,
-        channel_id: u64,
-        content: &str,
-    ) -> Result<Option<u64>, Error> {
+    pub fn send_message(&mut self, channel_id: u64, content: &str) -> Result<Option<u64>, Error> {
         let path = format!("/api/v10/channels/{channel_id}/messages");
         let body = serde_json::json!({ "content": content }).to_string();
         let (status, resp_body) = self.client.request(Method::Post, &path, Some(&body))?;
