@@ -170,6 +170,10 @@ impl ReadBuf {
     ///
     /// May read more than `need` bytes if the OS provides them — the extra
     /// data stays buffered for subsequent calls.
+    ///
+    /// On error, bytes already read within the same call remain in
+    /// the buffer, so retrying with the same `need` resumes where
+    /// the previous attempt left off.
     pub fn fill_from(&mut self, reader: &mut impl Read, need: usize) -> Result<(), FillError> {
         let target = self.start.saturating_add(need);
         if self.end >= target {
@@ -184,7 +188,12 @@ impl ReadBuf {
 
     /// Read from `reader` in a loop, calling `f` after each read
     /// until `f` returns `Ok(Some(value))` or an error occurs.
-    /// `f` may return `Ok(None)` to request more data.
+    /// `f` may return `Ok(None)` to request more data. `f` gets
+    /// `&ReadBuf` as its argument, so it can inspect the current
+    /// buffer contents and decide whether to continue or return
+    /// a value. Note, however, that for implementing incremental
+    /// scanning, the callback must manage the cursor position
+    /// itself, as it can't call mutable methods on `ReadBuf`.
     ///
     /// If there is already pending data in the buffer (`start <
     /// end`), `f` is called once before the first read.
@@ -195,6 +204,9 @@ impl ReadBuf {
     /// returned. A single read may buffer data beyond `limit`;
     /// that extra is available in the pending section, and the
     /// data is meant to remain available for later operations.
+    ///
+    /// On error, bytes already read within the same call remain in
+    /// the buffer, and a retry will check them before reading.
     pub fn read_until<T, E>(
         &mut self,
         reader: &mut impl Read,
@@ -242,7 +254,7 @@ impl ReadBuf {
 
     /// Perform a single read, retrying on `EINTR`. Updates `self.end` on success.
     fn read_once(&mut self, reader: &mut impl Read) -> Result<(), FillError> {
-        debug_assert!(self.end < self.buf.len());
+        assert!(self.end < self.buf.len());
         loop {
             match reader.read(&mut self.buf[self.end..]) {
                 Ok(0) => return Err(FillError::Eof),
