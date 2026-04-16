@@ -11,6 +11,9 @@ pub trait Rng {
         u32::from_le_bytes(buf)
     }
     /// Return `true` with 1-in-8 probability.
+    // 1/2^n probabilities are efficient (single bit-mask). Among those,
+    // 1/8 balances fast reclaim (99% within ~35 calls) against not
+    // thrashing on short bursts (87.5% survive the first call).
     fn one_in_eight_odds(&mut self) -> bool {
         self.next_u32() & 0b111 == 0
     }

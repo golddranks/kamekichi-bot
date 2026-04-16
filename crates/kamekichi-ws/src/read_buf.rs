@@ -22,7 +22,7 @@
 //!
 //! Two fill strategies:
 //!
-//! - [`ReadBuf::fill_from`] — for known lengths: block until at least `need`
+//! - [`ReadBuf::fill_from`] — for known lengths: loop until at least `need`
 //!   pending bytes are available. Used for WebSocket frames
 //!   where the payload length is known upfront.
 //!
@@ -55,12 +55,13 @@ use std::ops::Range;
 
 use crate::rng::Rng;
 
-/// Floor for the readable slice passed to `Read::read`, to avoid tiny reads.
+/// Floor for the readable slice reserved at the start of a read loop
+/// to avoid tiny reads.
 const MIN_READ_BUF: usize = 4096;
 
 /// Extra headroom past the requested length, so reads near the target still
 /// get reasonably sized slices.
-const MIN_OVERSHOOT: usize = 512;
+const MIN_READ_HEADROOM: usize = 512;
 
 /// Error from [`ReadBuf::read_until`].
 #[derive(Debug)]
@@ -71,7 +72,7 @@ pub(crate) enum ReadUntilError<E> {
     Io(io::Error),
     /// The stream returned `WouldBlock` or `TimedOut`.
     WouldBlock,
-    /// Pending data reached the caller's `max_len` limit before the callback produced a value.
+    /// Pending data reached the caller's [`limit`](ReadBuf::read_until) before the callback produced a value.
     LimitReached,
     /// The user's callback's error for passing through.
     UserError(E),
@@ -88,19 +89,13 @@ pub(crate) enum FillError {
     WouldBlock,
 }
 
-impl FillError {
-    fn into_read_until<E>(self) -> ReadUntilError<E> {
-        match self {
+impl<E> From<FillError> for ReadUntilError<E> {
+    fn from(e: FillError) -> Self {
+        match e {
             FillError::Eof => ReadUntilError::Eof,
             FillError::WouldBlock => ReadUntilError::WouldBlock,
             FillError::Io(e) => ReadUntilError::Io(e),
         }
-    }
-}
-
-impl<E> From<E> for ReadUntilError<E> {
-    fn from(e: E) -> Self {
-        ReadUntilError::UserError(e)
     }
 }
 
@@ -109,6 +104,17 @@ pub(crate) struct ReadBuf {
     buf: Vec<u8>,
     start: usize,
     end: usize,
+}
+
+impl std::fmt::Debug for ReadBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadBuf")
+            .field("start", &self.start)
+            .field("end", &self.end)
+            .field("len", &self.buf.len())
+            .field("cap", &self.buf.capacity())
+            .finish()
+    }
 }
 
 impl ReadBuf {
@@ -126,7 +132,11 @@ impl ReadBuf {
         &self.buf[self.start..self.end]
     }
 
-    /// Access the backing buffer by absolute range.
+    /// Access the initialized part of the backing buffer by absolute range.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range extends past `len` (the initialized region).
     pub fn slice(&self, range: Range<usize>) -> &[u8] {
         &self.buf[range]
     }
@@ -143,9 +153,9 @@ impl ReadBuf {
     }
 
     /// Advance the read cursor past `n` bytes of pending data.
+    /// If `n` exceeds the data, it is clamped to the pending data length.
     pub fn consume(&mut self, n: usize) {
-        assert!(self.start + n <= self.end);
-        self.start += n;
+        self.start = self.end.min(self.start.saturating_add(n));
     }
 
     /// Ensure at least `need` bytes are available in [`pending()`](Self::pending),
@@ -158,7 +168,7 @@ impl ReadBuf {
         if self.end >= target {
             return Ok(());
         }
-        self.ensure_initialized(need);
+        self.ensure_initialized(target);
         while self.end < target {
             self.read_once(reader)?;
         }
@@ -185,30 +195,30 @@ impl ReadBuf {
     ) -> Result<T, ReadUntilError<E>> {
         // Check pre-existing data before the first (potentially blocking) read.
         if self.end > self.start
-            && let Some(v) = f(self)?
+            && let Some(v) = f(self).map_err(ReadUntilError::UserError)?
         {
             return Ok(v);
         }
-        self.ensure_initialized(limit);
+        self.ensure_initialized(self.start.saturating_add(limit));
         loop {
             if self.end - self.start >= limit {
                 // Pending data reached the caller's limit — f already
                 // saw all data on the previous iteration.
                 return Err(ReadUntilError::LimitReached);
             }
-            self.read_once(reader).map_err(FillError::into_read_until)?;
-            if let Some(v) = f(self)? {
+            self.read_once(reader)?;
+            if let Some(v) = f(self).map_err(ReadUntilError::UserError)? {
                 return Ok(v);
             }
         }
     }
 
-    /// Ensure at least `min_len` bytes past `end` are initialized.
-    /// May allocate more than requested for efficiency.
-    fn ensure_initialized(&mut self, min_len: usize) {
-        let needed = self
-            .end
-            .saturating_add(min_len.saturating_add(MIN_OVERSHOOT).max(MIN_READ_BUF));
+    /// Ensure the buffer is initialized to at least `target`.
+    /// May initialize more than requested for efficiency.
+    fn ensure_initialized(&mut self, target: usize) {
+        let needed = target
+            .saturating_add(MIN_READ_HEADROOM)
+            .max(self.end.saturating_add(MIN_READ_BUF));
         if self.buf.len() < needed {
             self.buf.resize(needed, 0);
         }

@@ -1986,6 +1986,16 @@ fn read_until_would_block() {
 }
 
 #[test]
+fn read_buf_debug_format() {
+    let mut buf = ReadBuf::with_capacity(64);
+    buf.fill_from(&mut Cursor::new(b"hello".to_vec()), 5)
+        .unwrap();
+    let dbg = format!("{buf:?}");
+    assert!(dbg.contains("ReadBuf"));
+    assert!(dbg.contains("start"));
+}
+
+#[test]
 fn read_buf_shrinks_after_large_fill() {
     let mut buf = ReadBuf::with_capacity(64);
     // Fill with enough data to grow capacity well past 128.
