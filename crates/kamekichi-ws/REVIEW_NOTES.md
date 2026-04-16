@@ -64,3 +64,15 @@ Well-structured module. The ASCII layout diagram and module-level docs are excel
 17. `read_until` doc doesn't hint at how the callback manages cursor state
   - **Problem because:** The doc says "the callback must manage the cursor position itself, as it can't call mutable methods on `ReadBuf`" but doesn't hint at *how*. The actual usage in `proto.rs:440–468` does it via captured variables (`scan`, `prev_nl`, `n_lines`). A parenthetical like "(e.g., via captured variables)" would close the gap for a reader who hasn't seen the call site yet.
   - **Not a problem because:** It's not my job to babysit the users of the library. It's nice enough to give hints about incremental reads and managing your own cursors. If you don't know how to do that, you should study more Rust. The callback is `FnMut`, so that's easy enough.
+18. `read_until` safety comment says `target < buf.len()` — technically correct but glosses over the chain
+  - **Problem because:** The comment claims `ensure_initialized` ensures `target < buf.len()`. The actual guarantee is stronger: `target + 512 <= buf.len()`, so `target < buf.len()` follows but the comment doesn't show the intermediate step. A reader verifying the safety argument has to go read `ensure_initialized` to confirm.
+  - **Not a problem because:** `target == buf.len()` NEVER happens. `<` is the simplest and correct in the best way, that is, technically correct. `<=` would be downright misleading.
+19. `ensure_initialized` — the `max` expression is the hardest line to parse in the module
+  - **Problem because:** `target.saturating_add(MIN_READ_HEADROOM).max(self.end.saturating_add(MIN_READ_SLICE))` — the two arms serve different purposes (headroom past target vs. minimum readable slice past `end`) but the `max` merges them into one expression without annotation. A reader has to decompose it mentally.
+  - **Not a problem because:** It's one damn line. Not rocket science. I can't even
+20. `fill_from` doc says "same `need`" for retries — implies stricter contract than exists
+  - **Problem because:** "retrying with the same `need` resumes where the previous attempt left off" is true but suggests the caller *must* pass the same `need`. A different `need` also works correctly since buffered bytes persist. The doc implies a requirement that doesn't exist.
+  - **Not a problem because:** The doc says "so retrying with the same `need` resumes where the previous attempt left off". This is an implication, an explanation of a case. NOWHERE does ANYBODY suggest that the caller *must* pass the same `need`.
+21. `maybe_compact` threshold is effectively ignored for small buffers
+  - **Problem because:** `self.start > threshold.max(self.end / 2)` — when `end` is small (say 100) and `threshold` is 8192, the condition requires `start > 8192`, which is impossible. So for small buffers, compaction only triggers via the `start == end` fast path. The doc doesn't call out this interaction.
+  - **Not a problem because:** That's exactly its purpose. The docs don't call out this interaction because it's a inane detail that the user doesn't have to care about.

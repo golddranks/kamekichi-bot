@@ -7,16 +7,18 @@
 //!  0        start      end           len         cap
 //! ```
 //!
-//! - **consumed** (`0..start`) — data already processed by the caller. Still
-//!   accessible via `ReadBuf::all_read` / `ReadBuf::slice` with absolute
-//!   ranges until the next `ReadBuf::compact`.
+//! - **consumed** (`0..start`) — data already processed by the caller.
+//!   [`consume`](ReadBuf::consume) advances `start` but does not discard
+//!   the bytes — they remain accessible until the next
+//!   [`compact`](ReadBuf::compact). This lets callers consume a frame
+//!   header while still borrowing the payload without copying data out.
 //! - **pending** (`start..end`) — data received but not yet processed.
 //! - **initialized** (`end..len`) — initialized memory available for the
 //!   next `Read::read` call. `len` only shrinks via an explicit
 //!   [`ReadBuf::maybe_shrink_capacity`] call, so zero-initializing
 //!   the same region again and again is avoided.
-//! - **allocated** (`len..cap`) — allocated but uninitialized; can be
-//!   initialized without reallocating.
+//! - **allocated** (`len..cap`) — allocated but uninitialized part of the
+//!   underlying allocation; can be initialized without reallocating.
 //!
 //! # Filling
 //!
@@ -31,17 +33,8 @@
 //!   response header parsing where the terminator position is unknown.
 //!
 //! Both retry immediately on `EINTR`, treat `read() → 0` as EOF,
-//! and return `WouldBlock` when the stream read would block or time out,
+//! and return `WouldBlock` when the stream read would block or timeout,
 //! to allow the caller to retry the operation later.
-//!
-//! # Consumed-but-accessible data
-//!
-//! [`consume`](ReadBuf::consume) advances `start` but does **not** discard
-//! the bytes — they remain in `buf[0..start]` until the next
-//! [`compact`](ReadBuf::compact). This allows callers to consume a
-//! frame header while still borrowing the payload via
-//! [`ReadBuf::all_read`] or [`ReadBuf::slice`] (using [`ReadBuf::cursor`]
-//! for the offset) — without copying to a separate buffer.
 //!
 //! # Memory lifecycle
 //!
