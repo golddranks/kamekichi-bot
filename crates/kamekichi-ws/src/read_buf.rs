@@ -1,4 +1,4 @@
-//! Single-allocation read buffer for streaming protocol parsing.
+//! Contiguous read buffer for streaming protocol parsing.
 //!
 //! # Layout
 //!
@@ -57,7 +57,7 @@ use crate::rng::Rng;
 
 /// Floor for the readable slice reserved at the start of a read loop
 /// to avoid tiny reads.
-const MIN_READ_BUF: usize = 4096;
+const MIN_READ_SLICE: usize = 4096;
 
 /// Extra headroom past the requested length, so reads near the target still
 /// get reasonably sized slices.
@@ -74,8 +74,8 @@ pub(crate) enum ReadUntilError<E> {
     WouldBlock,
     /// Pending data reached the caller's [`limit`](ReadBuf::read_until) before the callback produced a value.
     LimitReached,
-    /// The user's callback's error for passing through.
-    UserError(E),
+    /// The callback error, passed through.
+    CallbackError(E),
 }
 
 /// Error from [`ReadBuf::fill_from`].
@@ -153,8 +153,16 @@ impl ReadBuf {
     }
 
     /// Advance the read cursor past `n` bytes of pending data.
-    /// If `n` exceeds the data, it is clamped to the pending data length.
+    ///
+    /// # Panics
+    ///
+    /// May panic if `n` exceeds the pending data length.
     pub fn consume(&mut self, n: usize) {
+        debug_assert!(
+            n <= self.end - self.start,
+            "consume({n}) exceeds pending length ({})",
+            self.end - self.start,
+        );
         self.start = self.end.min(self.start.saturating_add(n));
     }
 
@@ -195,7 +203,7 @@ impl ReadBuf {
     ) -> Result<T, ReadUntilError<E>> {
         // Check pre-existing data before the first (potentially blocking) read.
         if self.end > self.start
-            && let Some(v) = f(self).map_err(ReadUntilError::UserError)?
+            && let Some(v) = f(self).map_err(ReadUntilError::CallbackError)?
         {
             return Ok(v);
         }
@@ -207,7 +215,7 @@ impl ReadBuf {
                 return Err(ReadUntilError::LimitReached);
             }
             self.read_once(reader)?;
-            if let Some(v) = f(self).map_err(ReadUntilError::UserError)? {
+            if let Some(v) = f(self).map_err(ReadUntilError::CallbackError)? {
                 return Ok(v);
             }
         }
@@ -216,9 +224,11 @@ impl ReadBuf {
     /// Ensure the buffer is initialized to at least `target`.
     /// May initialize more than requested for efficiency.
     fn ensure_initialized(&mut self, target: usize) {
+        // Headroom past `target` so that reads near the limit still get
+        // reasonably sized slices instead of dwindling to single bytes.
         let needed = target
             .saturating_add(MIN_READ_HEADROOM)
-            .max(self.end.saturating_add(MIN_READ_BUF));
+            .max(self.end.saturating_add(MIN_READ_SLICE));
         if self.buf.len() < needed {
             self.buf.resize(needed, 0);
         }
@@ -279,8 +289,10 @@ impl ReadBuf {
     }
 
     /// Probabilistically shrink the backing allocation if capacity
-    /// exceeds `max_cap`.  Only effective after a compact (`start == 0`).
+    /// exceeds `max_cap`.  Should be called after compacting.
     pub fn maybe_shrink_capacity(&mut self, max_cap: usize, rng: &mut impl Rng) {
+        // Only effective when start == 0 (i.e. after compact) and when
+        // the current data length doesn't already exceed max_cap.
         if self.start == 0 && self.buf.capacity() > max_cap && rng.one_in_eight_odds() {
             self.buf.truncate(self.end);
             self.buf.shrink_to(max_cap);

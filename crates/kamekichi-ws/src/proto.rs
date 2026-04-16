@@ -476,7 +476,7 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                     // so it always returns HeadersTooLarge before the byte
                     // limit fires.
                     ReadUntilError::LimitReached => unreachable!(),
-                    ReadUntilError::UserError(e) => e,
+                    ReadUntilError::CallbackError(e) => e,
                 })?
         };
 
