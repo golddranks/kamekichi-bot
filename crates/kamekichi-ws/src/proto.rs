@@ -162,7 +162,7 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
         }
 
         // Track how many bytes fill_from reads from the OS.
-        let end_before = bufs.read.all_read().len();
+        let old_end = bufs.read.end_offset();
 
         // Parse frame header
         let (fin, opcode, payload_len) = {
@@ -234,7 +234,7 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
 
         // A small read means data trickled in (one frame); a big
         // read (or no read at all) means data was already buffered.
-        let bytes_read = bufs.read.all_read().len() - end_before;
+        let bytes_read = bufs.read.end_offset() - old_end;
         if bytes_read > 0 && bytes_read <= SMALL_READ_THRESHOLD {
             sess.flood_score = sess.flood_score.saturating_sub(1);
         }
@@ -245,7 +245,7 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
             return Err(ConnError::Flood);
         }
 
-        let pos = bufs.read.cursor();
+        let pos = bufs.read.start_offset();
         let payload_range = pos - payload_len..pos;
 
         match opcode {

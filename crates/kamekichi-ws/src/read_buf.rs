@@ -126,6 +126,8 @@ impl ReadBuf {
     /// Initialized part of the backing buffer (including read-into
     /// and zero-initialized regions) at the given absolute range.
     ///
+    /// Absolute offsets are invalidated by [`compact`](Self::compact).
+    ///
     /// # Panics
     ///
     /// Panics if the range extends past `self.buf.len()`.
@@ -133,14 +135,13 @@ impl ReadBuf {
         &self.buf[range]
     }
 
-    /// All data read into the buffer so far (`[0..end]`), including
-    /// any bytes already advanced past by [`consume`](Self::consume).
-    pub fn all_read(&self) -> &[u8] {
-        &self.buf[..self.end]
+    /// Absolute offset of the end of pending data in the backing buffer.
+    pub fn end_offset(&self) -> usize {
+        self.end
     }
 
-    /// Absolute offset of the consume cursor into the backing buffer.
-    pub fn cursor(&self) -> usize {
+    /// Absolute offset of the start of pending data in the backing buffer.
+    pub fn start_offset(&self) -> usize {
         self.start
     }
 
