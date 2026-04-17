@@ -120,3 +120,24 @@ Well-structured module. The ASCII layout diagram and module-level docs are excel
 
 - **Problem because:** The probabilistic `one_in_eight_odds()` gate means a caller with a known-idle connection can't deterministically reclaim memory. There's no `force` parameter or separate non-probabilistic method.
 - **Not a problem because:** YAGNI.
+
+23. `read_until` safety comment — `ensure_initialized` invariant chain
+
+- **Problem because:** The safety comment says "`ensure_initialized` ensures `target < buf.len()`" but doesn't show _why_. A reviewer might worry this breaks if `MIN_READ_HEADROOM` is zero. The actual chain: `read_once` needs `end < buf.len()`; the loop guard gives `end < target`; `ensure_initialized` gives `buf.len() >= target`. So `end < target <= buf.len()`, thus `end < buf.len()`. This holds even if both `MIN_READ_HEADROOM` and `MIN_READ_SLICE` are zero — the `>=` is sufficient, strict `<` between `target` and `buf.len()` is not required.
+- **Not a problem because:** The safety comment has TWO strict unequalities
+  like a < b < c. Only one is required to be strict to prove a < c. So if the
+  reviewer worries that b < c might not hold in some hypothetical future where
+  for some unfathomable reason a maintainer decides to set a const to zero, there is still the other, a < b inequality. Not worth worrying about.
+
+25. `len` label in the ASCII layout diagram
+
+- **Problem because:** The diagram uses `len` for the initialized-region boundary (`buf.len()`), but the module has no `len` field — and `len` conventionally suggests "amount of data." A reader's first pass may confuse it with pending data length. A label like `init` would map more clearly to the concept.
+- **Not a problem because:** `len` is a field on the underlying `Vec`, plus a
+  method on it. I can't see any other, more fitting name, especially as we can't
+  rename `Vec`'s internals.
+
+26. `WouldBlock` variant name covers both `WouldBlock` and `TimedOut`
+
+- **Problem because:** `FillError::WouldBlock` and `ReadUntilError::WouldBlock` are returned for both `io::ErrorKind::WouldBlock` and `io::ErrorKind::TimedOut`. The name only reflects one of the two cases. A caller pattern-matching on the variant might not realize timeouts are folded in.
+- **Not a problem because:** These two error cases are conflated on different
+  operating systems, so merging them into one is the portable solution. Both signal the same thing: no serious error has happened, so retry later, and it might succeed.

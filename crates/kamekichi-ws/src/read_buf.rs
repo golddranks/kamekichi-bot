@@ -113,7 +113,7 @@ impl ReadBuf {
     }
 
     /// Number of unconsumed bytes in the buffer.
-    fn pending_len(&self) -> usize {
+    pub fn pending_len(&self) -> usize {
         debug_assert!(self.start <= self.end);
         self.end - self.start
     }
@@ -136,11 +136,15 @@ impl ReadBuf {
     }
 
     /// Absolute offset of the end of pending data in the backing buffer.
+    ///
+    /// Absolute offsets are invalidated by [`compact`](Self::compact).
     pub fn end_offset(&self) -> usize {
         self.end
     }
 
     /// Absolute offset of the start of pending data in the backing buffer.
+    ///
+    /// Absolute offsets are invalidated by [`compact`](Self::compact).
     pub fn start_offset(&self) -> usize {
         self.start
     }
