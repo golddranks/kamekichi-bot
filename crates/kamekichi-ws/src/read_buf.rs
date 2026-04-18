@@ -44,6 +44,8 @@
 //! [`ReadBuf::maybe_compact`] (compact only when the consumed prefix
 //! exceeds a threshold), and [`ReadBuf::maybe_shrink_capacity`]
 //! (probabilistically release excess backing allocation).
+//! ([`ReadBuf::clear`] resets cursors without touching memory and is
+//! not a reclamation method.)
 
 use std::io::{self, Read};
 use std::ops::Range;
@@ -53,7 +55,7 @@ use crate::rng::Rng;
 /// Error from [`ReadBuf::read_until`].
 #[derive(Debug)]
 pub enum ReadUntilError<E> {
-    /// The stream reached EOF before enough data was available.
+    /// The stream reached EOF before the callback produced a value.
     Eof,
     /// An IO error occurred while reading.
     Io(io::Error),
@@ -268,9 +270,10 @@ impl ReadBuf {
             match reader.read(&mut self.buf[self.end..]) {
                 Ok(0) => return Err(FillError::Eof),
                 Ok(n) => {
+                    let slice_len = self.buf.len() - self.end;
                     assert!(
-                        n <= self.buf.len() - self.end,
-                        "Buggy Read::read returned count exceeding buffer length",
+                        n <= slice_len,
+                        "Buggy Read::read returned {n} bytes into a {slice_len}-byte slice",
                     );
                     self.end += n;
                     return Ok(());
@@ -290,8 +293,10 @@ impl ReadBuf {
     }
 
     /// Shift unconsumed data to the front of the buffer.
-    /// Preserves the spare region beyond `end` so subsequent reads
-    /// don't need to zero-initialize again.
+    /// The spare region beyond the new `end` remains initialized so
+    /// subsequent reads don't re-zero, though its byte contents are
+    /// shuffled (now holding the old consumed/pending/spare data
+    /// shifted forward).
     pub fn compact(&mut self) {
         if self.start == self.end {
             self.clear();
