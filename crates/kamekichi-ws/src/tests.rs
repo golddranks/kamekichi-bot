@@ -786,6 +786,23 @@ fn connect_headers_too_large() {
 }
 
 #[test]
+fn connect_headers_too_many_lines() {
+    // Overflow the 64-entry line_ends array inside the handshake callback.
+    let mut rx = Vec::from("HTTP/1.1 101\r\n");
+    for _ in 0..64 {
+        rx.extend_from_slice(b"X: v\r\n");
+    }
+    assert!(matches!(
+        WebSocket::new(CounterRng(0)).connect(
+            ConnectMock::with_response(rx),
+            "example.com",
+            "/"
+        ),
+        Err(Error::Reconnect(ConnError::HeadersTooLarge))
+    ));
+}
+
+#[test]
 fn connect_missing_upgrade() {
     assert!(matches!(
         WebSocket::new(CounterRng(0)).connect(
@@ -2166,6 +2183,14 @@ fn connect_subprotocol_unrequested() {
         result,
         Err(Error::Reconnect(ConnError::InvalidSubprotocol))
     ));
+}
+
+#[test]
+fn subprotocols_empty_slice_is_none() {
+    let ws = WebSocket::new(CounterRng(0))
+        .subprotocols(&["chat"])
+        .subprotocols(&[]);
+    assert!(ws.sess.subprotocols.is_none());
 }
 
 // ---- Custom headers ----
