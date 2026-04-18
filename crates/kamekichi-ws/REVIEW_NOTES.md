@@ -150,3 +150,8 @@ Well-structured module. The ASCII layout diagram and module-level docs are excel
   an error case, unlike the other variants. The Io variant is arguably similar,
   but common enough, plus unlike "callback", names a _domain_, that I'm happy
   with it.
+
+28. `maybe_shrink_capacity` debug/release divergence
+
+- **Problem because:** `maybe_shrink_capacity` has `debug_assert!(self.start == 0, "call compact() before shrinking")` paired with a runtime `if self.start == 0 && ...` gate. In debug builds, calling without prior compaction panics; in release builds, the call silently no-ops. Same hybrid pattern as `consume` (#4): an invariant-violating caller gets different behavior depending on build mode, which can mask bugs that only surface in release.
+- **Not a problem because:** I call these "soft invariants", and they are commonly used both in Rust (integer over/underflows, panicing on debug, wrapping in release) and in Linux kernel "don't kernel panic if you can go on, even if in a slightly degraded state". For some reason, the AI reviewer seems to have an allergy against them. The point is to crash early, IN TESTING, where crashes can be tolerated easily. If there is a "natural" no-op state or default action that could be taken instead, opt to do that in release mode. If not, _then_ consider crashing. The review messages sometimes say that this pattern "shows up green in CI, and silently corrupts in production". No. It loudly crashes in CI, and does no harm in production. That's the point.

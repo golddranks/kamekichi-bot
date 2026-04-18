@@ -215,7 +215,7 @@ impl ReadBuf {
         &mut self,
         reader: &mut impl Read,
         limit: usize,
-        mut f: impl FnMut(&Self) -> Result<Option<T>, E>,
+        mut f: impl FnMut(&ReadBuf) -> Result<Option<T>, E>,
     ) -> Result<T, ReadUntilError<E>> {
         // Check pre-existing data before the first (potentially blocking) read.
         if self.end > self.start
@@ -232,7 +232,7 @@ impl ReadBuf {
         // (and each subsequent iteration) we have `end < target`, and
         // `ensure_initialized` ensures `target < buf.len()`, so
         // end < target < buf.len() holds. `target` is fixed throughout,
-        // and `f` cannot modify `&Self`.
+        // and `f` cannot modify immutable `&ReadBuf`.
         loop {
             self.read_once(reader)?;
             if let Some(v) = f(self).map_err(ReadUntilError::CallbackError)? {
@@ -251,7 +251,7 @@ impl ReadBuf {
         /// to avoid tiny reads.
         const MIN_READ_SLICE: usize = 4096;
 
-        /// Extra headroom past the requested length, so reads closing near the
+        /// Extra headroom past the requested target, so reads closing near the
         /// target still get reasonably sized slices.
         const MIN_READ_HEADROOM: usize = 512;
 
@@ -292,13 +292,16 @@ impl ReadBuf {
         }
     }
 
-    /// Shift unconsumed data to the front of the buffer.
-    /// The spare region beyond the new `end` remains initialized so
-    /// subsequent reads don't re-zero, though its byte contents are
-    /// shuffled (now holding the old consumed/pending/spare data
-    /// shifted forward).
+    /// Shift unconsumed ("pending") data to the front of the buffer,
+    /// overwriting the "consumed" portion. The spare region beyond
+    /// the new `end` remains initialized so subsequent reads don't
+    /// re-zero. When pending data was shifted, the spare's byte
+    /// contents are left shuffled (the old consumed/pending/spare
+    /// data not overwritten remains untouched).
     pub fn compact(&mut self) {
-        if self.start == self.end {
+        if self.start == 0 {
+            return;
+        } else if self.start == self.end {
             self.clear();
         } else if self.start > 0 {
             self.buf.copy_within(self.start..self.end, 0);
