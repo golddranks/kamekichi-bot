@@ -3,8 +3,8 @@
 //! # Layout
 //!
 //! ```text
-//!  [ consumed | pending | initialized | allocated ]
-//!  0        start      end           len         cap
+//!  [ consumed | pending |   spare   | allocated ]
+//!  0        start      end         len         cap
 //! ```
 //!
 //! - **consumed** (`0..start`) — data already processed by the caller.
@@ -13,7 +13,7 @@
 //!   [`compact`](ReadBuf::compact). This lets callers consume a frame
 //!   header while still borrowing the payload without copying data out.
 //! - **pending** (`start..end`) — data received but not yet processed.
-//! - **initialized** (`end..len`) — initialized memory available for the
+//! - **spare** (`end..len`) — initialized memory available for the
 //!   next `Read::read` call. `len` only shrinks via an explicit
 //!   [`ReadBuf::maybe_shrink_capacity`] call, so zero-initializing
 //!   the same region again and again is avoided.
@@ -268,11 +268,11 @@ impl ReadBuf {
             match reader.read(&mut self.buf[self.end..]) {
                 Ok(0) => return Err(FillError::Eof),
                 Ok(n) => {
-                    self.end += n;
                     assert!(
-                        self.end <= self.buf.len(),
+                        n <= self.buf.len() - self.end,
                         "Buggy Read::read returned count exceeding buffer length",
                     );
+                    self.end += n;
                     return Ok(());
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -290,7 +290,7 @@ impl ReadBuf {
     }
 
     /// Shift unconsumed data to the front of the buffer.
-    /// Preserves the initialized space beyond `end` so subsequent reads
+    /// Preserves the spare region beyond `end` so subsequent reads
     /// don't need to zero-initialize again.
     pub fn compact(&mut self) {
         if self.start == self.end {
