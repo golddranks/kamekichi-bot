@@ -39,9 +39,11 @@
 //! # Memory lifecycle
 //!
 //! The buffer grows as needed during fills but never shrinks on its
-//! own. The caller is responsible for calling
-//! [`ReadBuf::maybe_compact`] and [`ReadBuf::maybe_shrink_capacity`]
-//! to reclaim memory.
+//! own. The caller is responsible for reclaiming memory via
+//! [`ReadBuf::compact`] (unconditional shift of pending data to offset 0),
+//! [`ReadBuf::maybe_compact`] (compact only when the consumed prefix
+//! exceeds a threshold), and [`ReadBuf::maybe_shrink_capacity`]
+//! (probabilistically release excess backing allocation).
 
 use std::io::{self, Read};
 use std::ops::Range;
@@ -86,6 +88,7 @@ impl<E> From<FillError> for ReadUntilError<E> {
 
 /// The main buffer container. See [module docs](self) for layout and design.
 pub struct ReadBuf {
+    // Invariant: `start <= end <= buf.len()`.
     buf: Vec<u8>,
     start: usize,
     end: usize,
@@ -130,7 +133,8 @@ impl ReadBuf {
     ///
     /// # Panics
     ///
-    /// Panics if the range extends past `self.buf.len()`.
+    /// Panics if the range extends past the initialized region of the
+    /// backing buffer.
     pub fn slice(&self, range: Range<usize>) -> &[u8] {
         &self.buf[range]
     }
@@ -218,17 +222,22 @@ impl ReadBuf {
             return Ok(v);
         }
         let target = self.start.saturating_add(limit);
+        if self.end >= target {
+            return Err(ReadUntilError::LimitReached);
+        }
         self.ensure_initialized(target);
-        // `read_once` requires `end < buf.len()`: the exit check
-        // ensures `end < target`, and `ensure_initialized` ensures
-        // `target < buf.len()`. `target` is fixed: `f` borrows `&Self`.
+        // `read_once` requires `end < buf.len()`: entering the loop
+        // (and each subsequent iteration) we have `end < target`, and
+        // `ensure_initialized` ensures `target < buf.len()`, so
+        // end < target < buf.len() holds. `target` is fixed throughout,
+        // and `f` cannot modify `&Self`.
         loop {
-            if self.end >= target {
-                return Err(ReadUntilError::LimitReached);
-            }
             self.read_once(reader)?;
             if let Some(v) = f(self).map_err(ReadUntilError::CallbackError)? {
                 return Ok(v);
+            }
+            if self.end >= target {
+                return Err(ReadUntilError::LimitReached);
             }
         }
     }
@@ -254,7 +263,7 @@ impl ReadBuf {
 
     /// Perform a single read, retrying on `EINTR`. Updates `self.end` on success.
     fn read_once(&mut self, reader: &mut impl Read) -> Result<(), FillError> {
-        assert!(self.end < self.buf.len());
+        debug_assert!(self.end < self.buf.len());
         loop {
             match reader.read(&mut self.buf[self.end..]) {
                 Ok(0) => return Err(FillError::Eof),

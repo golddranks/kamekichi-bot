@@ -141,3 +141,12 @@ Well-structured module. The ASCII layout diagram and module-level docs are excel
 - **Problem because:** `FillError::WouldBlock` and `ReadUntilError::WouldBlock` are returned for both `io::ErrorKind::WouldBlock` and `io::ErrorKind::TimedOut`. The name only reflects one of the two cases. A caller pattern-matching on the variant might not realize timeouts are folded in.
 - **Not a problem because:** These two error cases are conflated on different
   operating systems, so merging them into one is the portable solution. Both signal the same thing: no serious error has happened, so retry later, and it might succeed.
+
+27. `ReadUntilError::CallbackError` variant naming asymmetry
+
+- **Problem because:** Other variants of `ReadUntilError` are `Eof`, `Io`, `WouldBlock`, `LimitReached` — none carry an `Error` suffix. `CallbackError(E)` is the odd one out. `Callback(E)` would match the naming pattern of the sibling variants.
+- **Not a problem because:** `CallbackError` differs from the others in the sense that it's not a specific error, but "some" error decided by the caller.
+  Naming the error just as "Callback" wouldn't convey that it is, indeed,
+  an error case, unlike the other variants. The Io variant is arguably similar,
+  but common enough, plus unlike "callback", names a _domain_, that I'm happy
+  with it.
