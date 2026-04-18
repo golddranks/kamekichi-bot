@@ -1137,9 +1137,25 @@ fn pong_suppressed_when_send_buffer_full() {
 // ---- Fragmented message too large ----
 
 #[test]
-fn fragmented_message_too_large() {
+fn fragmented_message_too_large_text() {
     let mut data = Vec::new();
     data.extend(frame(false, OP_TEXT, &[b'a'; 100]));
+    data.extend(frame(true, OP_CONTINUATION, &[b'b'; 100]));
+
+    let mut ws = WebSocket::new(CounterRng(0))
+        .max_payload(150)
+        .with_stream(MockStream::new(data));
+
+    assert!(matches!(
+        ws.read_message(),
+        Err(Error::Reconnect(ConnError::FragmentedMessageTooLarge(200)))
+    ));
+}
+
+#[test]
+fn fragmented_message_too_large_bin() {
+    let mut data = Vec::new();
+    data.extend(frame(false, OP_BINARY, &[b'a'; 100]));
     data.extend(frame(true, OP_CONTINUATION, &[b'b'; 100]));
 
     let mut ws = WebSocket::new(CounterRng(0))
@@ -1837,7 +1853,7 @@ fn pending_send_would_block_during_read() {
 // ---- Fragment buffer shrinking ----
 
 #[test]
-fn fragment_buf_shrinks_after_large_message() {
+fn fragment_buf_shrinks_after_large_message_text() {
     let mut data = frame(false, OP_TEXT, &[b'a'; 200]);
     data.extend(frame(true, OP_CONTINUATION, &[b'b'; 200]));
     // Need a third message so the second read_message call enters the
@@ -1860,6 +1876,25 @@ fn fragment_buf_shrinks_after_large_message() {
     match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t.len(), 400),
         other => panic!("expected Text, got {other:?}"),
+    }
+    match ws.read_message().unwrap().message().unwrap() {
+        Message::Text(t) => assert_eq!(t, "done"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+#[test]
+fn fragment_buf_shrinks_after_large_message_bin() {
+    // Same as above, but for binary messages.
+    let mut data = frame(false, OP_BINARY, &[b'a'; 200]);
+    data.extend(frame(true, OP_CONTINUATION, &[b'b'; 200]));
+    data.extend(frame(true, OP_TEXT, b"done"));
+    let mut ws = WebSocket::new(ZeroRng)
+        .max_buf_size(125)
+        .with_stream(MockStream::new(data));
+    match ws.read_message().unwrap().message().unwrap() {
+        Message::Binary(t) => assert_eq!(t.len(), 400),
+        other => panic!("expected Binary, got {other:?}"),
     }
     match ws.read_message().unwrap().message().unwrap() {
         Message::Text(t) => assert_eq!(t, "done"),
@@ -1936,6 +1971,16 @@ fn read_until_buffer_full() {
     let data = vec![b'x'; 100];
     let result = buf.read_until::<(), ReadUntilError<()>>(
         &mut Cursor::new(data),
+        16,
+        |_| Ok(None), // never accept
+    );
+    assert!(matches!(result, Err(ReadUntilError::LimitReached)));
+
+    assert_eq!(buf.start_offset(), 0);
+    assert_eq!(buf.end_offset(), 100);
+
+    let result = buf.read_until::<(), ReadUntilError<()>>(
+        &mut Cursor::new([]),
         16,
         |_| Ok(None), // never accept
     );
@@ -2517,3 +2562,25 @@ const _: () = {
         _assert_sync::<CallerError>();
     }
 };
+
+#[test]
+fn compact_read_buf() {
+    let mut buf = ReadBuf::with_capacity(10);
+    let mut cursor = Cursor::new(b"aaaaabbbbbcccccddddd".to_vec());
+    buf.fill_from(&mut cursor, 5).unwrap();
+    buf.compact();
+    assert_eq!(buf.pending(), b"aaaaabbbbbcccccddddd");
+    buf.consume(5);
+    buf.fill_from(&mut cursor, 5).unwrap();
+    assert_eq!(buf.pending(), b"bbbbbcccccddddd");
+    assert_eq!(buf.start_offset(), 5);
+    assert_eq!(buf.end_offset(), 20);
+    buf.compact();
+    assert_eq!(buf.start_offset(), 0);
+    assert_eq!(buf.end_offset(), 15);
+    buf.consume(5);
+    buf.compact();
+    assert_eq!(buf.start_offset(), 0);
+    assert_eq!(buf.end_offset(), 10);
+    assert_eq!(buf.pending(), b"cccccddddd");
+}

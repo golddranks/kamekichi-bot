@@ -3,8 +3,8 @@
 //! # Layout
 //!
 //! ```text
-//!  [ consumed | pending |   spare   | allocated ]
-//!  0        start      end         len         cap
+//!  [ consumed | pending | spare | allocated ]
+//!  0        start      end     len         cap
 //! ```
 //!
 //! - **consumed** (`0..start`) — data already processed by the caller.
@@ -161,10 +161,10 @@ impl ReadBuf {
     ///
     /// May or may not panic if `n` exceeds the pending data length.
     pub fn consume(&mut self, n: usize) {
+        let pending_len = self.pending_len();
         debug_assert!(
-            n <= self.pending_len(),
-            "consume({n}) exceeds pending length ({})",
-            self.pending_len(),
+            n <= pending_len,
+            "consume({n}) exceeds pending length ({pending_len})",
         );
         self.start = self.end.min(self.start.saturating_add(n));
     }

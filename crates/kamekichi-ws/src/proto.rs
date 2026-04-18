@@ -273,7 +273,7 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
                         sess.flood_score = sess.flood_score.saturating_sub(relief);
                         return Ok(Some(Message::Text(&bufs.fragment_text)));
                     }
-                } else {
+                } else if sess.fragment_opcode == OP_BINARY {
                     let total = bufs.fragment_bin.len() + payload_len;
                     if total > sess.max_payload {
                         return Err(ConnError::FragmentedMessageTooLarge(total));
@@ -285,6 +285,8 @@ pub(crate) fn read_message<'b, S: Read + Write, R: Rng>(
                         sess.flood_score = sess.flood_score.saturating_sub(relief);
                         return Ok(Some(Message::Binary(&bufs.fragment_bin)));
                     }
+                } else {
+                    unreachable!("fragment_opcode is only set to OP_TEXT or OP_BINARY")
                 }
             }
 
@@ -475,7 +477,9 @@ impl<S: Read + Write, R: Rng> WebSocket<S, R> {
                     // The callback already checks data.len() >= MAX_HEADER,
                     // so it always returns HeadersTooLarge before the byte
                     // limit fires.
-                    ReadUntilError::LimitReached => unreachable!(),
+                    ReadUntilError::LimitReached => {
+                        unreachable!("should have returned HeadersTooLarge")
+                    }
                     ReadUntilError::CallbackError(e) => e,
                 })?
         };
